@@ -1,0 +1,1 @@
+{"name":"seatalk-bot","version":"1.0.0","description":"Virtual Assistant SOC Arjawinangun","main":"index.js","type":"module","scripts":{"deploy":"wrangler deploy"},"dependencies":{"jose":"^5.10.0","puppeteer":"^24.15.0","googleapis":"^121.0.0"},"devDependencies":{"wrangler":"^4.98.0"}}
