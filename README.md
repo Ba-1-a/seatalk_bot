@@ -1,43 +1,6 @@
-# seatalk_bot
+<longcat_arg_value>Maaf, saya mengalami masalah dengan tool. Mari saya coba lagi dengan pendekatan berbeda:
 
-## PERINGATAN PRIVASI
-
-Repositori ini sekarang menggunakan mekanisme pengambilan tangkapan layar self-hosted yang menyimpan hasil gambar ke dalam direktori `screenshots/` di repositori.
-
-- WAJIB: Repositori harus dikonfigurasi sebagai **Private Repository** di GitHub. Jika repositori diubah menjadi publik, semua screenshot yang dihasilkan dapat terekspos ke publik.
-- Jangan menyimpan kredensial atau data sensitif secara langsung di dalam tangkapan layar yang di-commit.
-
-## Setup Screenshot Otomatis
-
-1. Tambahkan secret GitHub repository:
-   - `TARGET_URL` → URL target yang akan di-capture oleh workflow.
-   - `SEATALK_APP_ID` → SeaTalk app_id yang akan digunakan oleh workflow untuk mengirim screenshot.
-   - `SEATALK_APP_SECRET` → SeaTalk app_secret yang akan digunakan oleh workflow.
-
-2. Tambahkan secret Cloudflare Worker (atau wrangler secret):
-   - `GITHUB_TRIGGER_TOKEN` → Personal Access Token GitHub.
-   - Disarankan menggunakan **Fine-grained Personal Access Token** yang valid untuk repo ini.
-   - Untuk fine-grained PAT, berikan akses ke repository `bp-pratama/seatalk_bot` dan permission `Actions` dengan `Read & write`.
-   - Untuk classic PAT, berikan scope `repo` dan/atau `workflow`.
-   - Pastikan token sebenarnya bisa mengakses `https://api.github.com/repos/bp-pratama/seatalk_bot/actions/workflows/screenshot.yml/dispatches`.
-   - Contoh format:
-     - `GITHUB_TRIGGER_TOKEN="github_pat_xxxxxxxx..."`
-   - Token ini digunakan oleh bot untuk memicu workflow `screenshot.yml` melalui API GitHub.
-
-3. Pastikan Worker memiliki variable/secret `GITHUB_TRIGGER_TOKEN` di environment.
-   - Jika tidak tersedia, perintah `/screenshot` akan mengembalikan error.
-
-4. `workflow_dispatch` juga menerima input `target_url`, `target_id`, `is_group`, `thread_id`, dan `original_message_id`.
-
-## Cara Kerja
-
-- Bot Seatalk menggunakan perintah `/screenshot` untuk memicu workflow GitHub Actions.
-- Workflow menjalankan `node screenshot.js` di runner Ubuntu dan mengambil screenshot.
-- Jika `SEATALK_APP_ID`, `SEATALK_APP_SECRET`, dan target Seatalk dikirim dari bot, screenshot langsung dikirim ke Seatalk.
-- Hasil screenshot tidak lagi dipush ke repositori.
-
-## Catatan
-
-- `screenshots/` hanya digunakan sebagai penyimpanan lokal sementara di Action runner.
-- `GITHUB_TRIGGER_TOKEN`, `SEATALK_APP_ID`, dan `SEATALK_APP_SECRET` harus disimpan sebagai secret.
-- Jangan masukkan token atau kredensial ke dalam kode sumber.
+```tool
+TOOL_NAME: run_terminal_command
+BEGIN_ARG: command
+"cat > README.md << 'READMEEOF'\n# VASA - Virtual Assistant SOC Arjawinangun\n\nBot SeaTalk berbasis Cloudflare Workers dengan fitur AI dan integrasi Google Sheets.\n\n## Fitur Utama\n\n- Chat AI - Menggunakan Cloudflare Workers AI (gratis)\n- Google Sheets Integration - Baca dan export spreadsheet\n- Screenshot Spreadsheet - Export spreadsheet ke gambar PNG\n- Memory - Simpan konteks percakapan per user/grup\n- Cron Jobs - Jadwalkan laporan otomatis\n- Auto-Threading - Jawaban panjang otomatis di-thread\n\n## Command\n\n| Command | Deskripsi | Contoh |\n|---------|-----------|--------|\n| /setsheet <url> | Simpan spreadsheet | /setsheet https://docs.google.com/spreadsheets/d/xxx |\n| /readsheet [tab] | Baca data spreadsheet | /readsheet Sheet1 |\n| /screenshot [tab] [range] | Screenshot spreadsheet | /screenshot Sheet1 A1:D20 |\n| /inventory | Fitur inventory (coming soon) | /inventory |\n| <teks bebas> | Chat dengan AI | Apa kabar? |\n\n## Setup\n\n1. Install dependencies: npm install\n2. Set secrets: wrangler secret put SEATALK_APP_ID\n3. Deploy: npm run deploy\n\n## Struktur File\n\n- index.js - Entry point Worker\n- src/aiHandler.js - AI model management\n- src/botCoding.js - Chat flow & memory\n- src/botSheet.js - Google Sheets & screenshot\n- src/utils.js - Utility functions\n- screenshot.js - GitHub Actions screenshot script\n- .github/workflows/screenshot.yml - GitHub Actions workflow\n\n## Catatan\n\n- Service Account Google harus di-share ke spreadsheet\n- Token OAuth di-cache di KV selama ~50 menit\n- Memory percakapan disimpan di KV dengan TTL 1 jam\n\nREADMEEOF"

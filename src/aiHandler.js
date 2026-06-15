@@ -1,6 +1,12 @@
 /**
  * src/aiHandler.js
- * Manajemen Multi-Model Cloudflare Workers AI.
+ * VASA - Virtual Assistant SOC Arjawinangun
+ * Manajemen Multi-Model Cloudflare Workers AI
+ * 
+ * Fitur:
+ * - Chat AI menggunakan Cloudflare Workers AI
+ * - Hybrid Memory: ringkasan percakapan lama
+ * - Support multiple model (gratis via CF Workers)
  */
 
 // Katalog Model AI yang digunakan (Gratis via CF Workers)
@@ -10,7 +16,14 @@ export const AI_MODELS = {
   CODING_LOGIC: '@cf/meta/llama-4-scout-17b-16e-instruct'     // (Opsional) jika butuh model khusus logika/koding
 };
 
-// Fungsi Utama Chat AI
+/**
+ * Fungsi Utama Chat AI
+ * @param {Object} env - Environment variables
+ * @param {String} systemPrompt - System prompt untuk AI
+ * @param {Array} history - Riwayat percakapan
+ * @param {String} model - Model AI yang digunakan
+ * @returns {String} Response dari AI
+ */
 export async function getAiReply(env, systemPrompt, history, model = AI_MODELS.CHAT_GENERAL) {
   try {
     const aiResponse = await env.AI.run(model, {
@@ -23,15 +36,21 @@ export async function getAiReply(env, systemPrompt, history, model = AI_MODELS.C
     return aiResponse.response || "Maaf, sistem AI tidak memberikan respon.";
   } catch (err) {
     console.log(`DEBUG: Error AI Handler (${model}):`, err.message);
-    return "Maaf, koneksi ke jaringan AI sedang sibuk. Mohon coba lagi.";
+    return "Maaf, konekeksi ke jaringan AI sedang sibuk. Mohon coba lagi.";
   }
 }
 
-// Fungsi Hybrid Memory: Meringkas percakapan lama menjadi Context Note
+/**
+ * Hybrid Memory: Meringkas percakapan lama menjadi Context Note
+ * @param {Object} env - Environment variables
+ * @param {String} currentContext - Context saat ini
+ * @param {Array} oldHistory - Riwayat percakapan lama
+ * @returns {String} Ringkasan context
+ */
 export async function summarizeContext(env, currentContext, oldHistory) {
   try {
     const historyText = oldHistory.map(m => `${m.role}: ${m.content}`).join('\n');
-    const prompt = `Buatlah ringkasan singkat maksimal 2 kalimat dari percakapan berikut untuk dijadikan catatan ingatan VA. \nCatatan sebelumnya: ${currentContext || 'Belum ada'}\nPercakapan baru:\n${historyText}`;
+    const prompt = `Buatlah ringkasan singkat maksimal 2 kalimat dari percakapan berikut untuk dijadikan catatan ingat VA. \nCatatan sebelumnya: ${currentContext || 'Belum ada'}\nPercakapan baru:\n${historyText}`;
 
     const summaryResponse = await env.AI.run(AI_MODELS.SUMMARY_FAST, {
       messages: [

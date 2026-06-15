@@ -1,0 +1,80 @@
+# .github/workflows/screenshot.yml
+# VASA - Virtual Assistant SOC Arjawinangun
+# GitHub Actions workflow untuk screenshot spreadsheet
+#
+# Trigger: workflow_dispatch (dipanggil dari Cloudflare Worker)
+# Inputs:
+#   - spreadsheet_id: ID Google Spreadsheet
+#   - target_id: ID target SeaTalk (employee_code atau group_id)
+#   - is_group: '1' jika grup, '0' jika single chat
+#   - thread_id: ID thread (optional)
+#   - original_message_id: ID pesan original (optional)
+
+name: Screenshot Spreadsheet
+
+on:
+  workflow_dispatch:
+    inputs:
+      spreadsheet_id:
+        description: 'Google Spreadsheet ID'
+        required: false
+        default: ''
+      target_id:
+        description: 'SeaTalk target ID'
+        required: true
+      is_group:
+        description: 'Is group chat? (1=yes, 0=no)'
+        required: false
+        default: '0'
+      thread_id:
+        description: 'Thread ID (optional)'
+        required: false
+        default: ''
+      original_message_id:
+        description: 'Original message ID (optional)'
+        required: false
+        default: ''
+
+jobs:
+  screenshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      
+      - name: Install dependencies
+        run: npm ci --production
+      
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+      
+      - name: Run screenshot script
+        env:
+          SPREADSHEET_ID: ${{ github.event.inputs.spreadsheet_id }}
+          GSA_PRIVATE_KEY: ${{ secrets.GSA_PRIVATE_KEY }}
+          GOOGLE_CLIENT_EMAIL: ${{ secrets.GOOGLE_CLIENT_EMAIL }}
+          SEATALK_APP_ID: ${{ secrets.SEATALK_APP_ID }}
+          SEATALK_APP_SECRET: ${{ secrets.SEATALK_APP_SECRET }}
+          SEATALK_TARGET_ID: ${{ github.event.inputs.target_id }}
+          SEATALK_IS_GROUP: ${{ github.event.inputs.is_group }}
+          SEATALK_THREAD_ID: ${{ github.event.inputs.thread_id }}
+          SEATALK_ORIGINAL_MESSAGE_ID: ${{ github.event.inputs.original_message_id }}
+        run: node screenshot.js
+      
+      - name: Upload screenshot artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshot-${{ github.run_id }}
+          path: screenshots/
+          retention-days: 1

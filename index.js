@@ -1,6 +1,13 @@
 /**
  * index.js
- * Bertindak sebagai Router (Polisi Lalu Lintas) dan Eksekutor Penjadwalan (Cron).
+ * VASA - Virtual Assistant SOC Arjawinangun
+ * Cloudflare Worker sebagai Event Callback & Cron Executor
+ * 
+ * Fitur:
+ * - Webhook callback untuk SeaTalk
+ * - seatalk_challenge handler
+ * - Routing command ke handler masing-masing
+ * - Cron job scheduler
  */
 
 import { handleGeneralChat } from './src/botCoding.js';
@@ -16,6 +23,7 @@ export default {
       const payload = await request.json();
       const event = payload.event || {};
 
+      // Handle seatalk_challenge untuk verifikasi webhook
       if (payload.event_type === "event_verification") {
         return new Response(JSON.stringify({ "seatalk_challenge": event.seatalk_challenge }), {
           status: 200, headers: { "Content-Type": "application/json" }
@@ -41,7 +49,7 @@ export default {
       } else if (incomingText.startsWith("/readsheet")) {
         await handleReadSheet(env, targetId, incomingText, isGroup, threadId, messageId);
       } else if (incomingText.startsWith("/screenshot")) {
-        // Rute khusus Screenshot ditambahkan agar tidak lari ke AI
+        // Rute khusus Screenshot - langsung proses di Worker
         await handleScreenshotCommand(env, targetId, incomingText, isGroup, threadId, messageId);
       } else {
         await handleGeneralChat(env, targetId, incomingText, isGroup, threadId, messageId);
@@ -49,7 +57,7 @@ export default {
 
       return new Response("OK", { status: 200 });
     } catch (err) {
-      console.error(err);
+      console.error("Worker Error:", err);
       return new Response("Error", { status: 500 });
     }
   },

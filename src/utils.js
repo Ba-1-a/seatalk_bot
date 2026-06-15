@@ -1,7 +1,21 @@
 /**
  * src/utils.js
+ * VASA - Virtual Assistant SOC Arjawinangun
+ * Utility functions untuk SeaTalk API dan helper umum
+ * 
+ * Fitur:
+ * - Extract incoming text dari berbagai format pesan
+ * - Reply ke user SeaTalk (single chat & group chat)
+ * - Send image via base64 ke SeaTalk
+ * - Send webhook ke system account
+ * - Smart chunking untuk pesan panjang
  */
 
+/**
+ * Extract teks dari berbagai format pesan SeaTalk
+ * @param {Object} message - Object pesan dari SeaTalk
+ * @returns {String} Teks yang diekstrak
+ */
 export function extractIncomingText(message) {
   let incomingText = "";
   if (typeof message.text === "string") {
@@ -14,10 +28,21 @@ export function extractIncomingText(message) {
   return incomingText.trim();
 }
 
+/**
+ * Hitung jumlah kata dalam teks
+ * @param {String} text - Teks yang akan dihitung
+ * @returns {Number} Jumlah kata
+ */
 export function countWords(text) {
   return text.trim().split(/\s+/).length;
 }
 
+/**
+ * Split pesan panjang menjadi chunk yang lebih kecil
+ * @param {String} text - Teks yang akan di-split
+ * @param {Number} limit - Batas karakter per chunk (default: 1500)
+ * @returns {String[]} Array of chunks
+ */
 export function smartChunkMessage(text, limit = 1500) { 
   const paragraphs = text.split('\n');
   const chunks = [];
@@ -35,7 +60,12 @@ export function smartChunkMessage(text, limit = 1500) {
   return chunks;
 }
 
-export async function replyToUser(env, messageText, targetId, isGroup, threadId, originalMessageId) {
+/**
+ * Get atau refresh SeaTalk access token
+ * @param {Object} env - Environment variables
+ * @returns {String} Access token
+ */
+async function getSeaTalkToken(env) {
   const cacheKey = "seatalk_access_token";
   let token = await env.BOT_MEMORY.get(cacheKey);
 
@@ -49,11 +79,27 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
     const tokenData = await tokenRes.json();
     if (!tokenData.app_access_token) {
       console.log("DEBUG: Gagal mendapatkan token SeaTalk", tokenData);
-      return null;
+      throw new Error("Gagal autentikasi SeaTalk");
     }
     token = tokenData.app_access_token;
-    await env.BOT_MEMORY.put(cacheKey, token, { expirationTtl: 7000 }); // Cache berlaku ~1.9 jam
+    await env.BOT_MEMORY.put(cacheKey, token, { expirationTtl: 7000 });
   }
+  
+  return token;
+}
+
+/**
+ * Kirim reply ke user SeaTalk
+ * @param {Object} env - Environment variables
+ * @param {String} messageText - Teks yang akan dikirim
+ * @param {String} targetId - ID target (employee_code atau group_id)
+ * @param {Boolean} isGroup - Apakah grup atau single chat
+ * @param {String} threadId - ID thread (untuk reply di thread)
+ * @param {String} originalMessageId - ID pesan original
+ * @returns {Object} Response dari SeaTalk API
+ */
+export async function replyToUser(env, messageText, targetId, isGroup, threadId, originalMessageId) {
+  const token = await getSeaTalkToken(env);
 
   const endpoint = isGroup 
     ? "https://openapi.seatalk.io/messaging/v2/group_chat" 
@@ -63,11 +109,11 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
   body.message = { tag: "text", text: { content: messageText } };
 
   if (isGroup) {
-      if (threadId && threadId !== "") {
-          body.thread_id = threadId;
-      } else if (originalMessageId) {
-          body.thread_id = originalMessageId; 
-      }
+    if (threadId && threadId !== "") {
+      body.thread_id = threadId;
+    } else if (originalMessageId) {
+      body.thread_id = originalMessageId; 
+    }
   }
 
   const resp = await fetch(endpoint, {
@@ -82,6 +128,11 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
   return await resp.json();
 }
 
+/**
+ * Kirim webhook ke system account
+ * @param {String} webhookUrl - URL webhook tujuan
+ * @param {String} messageText - Teks yang akan dikirim
+ */
 export async function sendSystemWebhook(webhookUrl, messageText) {
   try {
     await fetch(webhookUrl, {
@@ -97,39 +148,46 @@ export async function sendSystemWebhook(webhookUrl, messageText) {
   }
 }
 
-// FUNGSI PENGIRIMAN GAMBAR KE SEATALK VIA BASE64 (LEBIH AMAN & STABIL)
+/**
+ * Konversi ArrayBuffer ke base64 string
+ * @param {ArrayBuffer} buffer - Buffer yang akan dikonversi
+ * @returns {String} Base64 string
+ */
+function arrayBufferToBase64(buffer) {
+  let binary = '';
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
+/**
+ * Kirim gambar ke user SeaTalk via base64
+ * @param {Object} env - Environment variables
+ * @param {ArrayBuffer} buffer - Buffer gambar (PNG)
+ * @param {String} targetId - ID target
+ * @param {Boolean} isGroup - Apakah grup
+ * @param {String} threadId - ID thread
+ * @returns {Object} Response dari SeaTalk API
+ */
 export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threadId) {
   try {
     // 1. Ambil Token SeaTalk
-    const cacheKey = "seatalk_access_token";
-    let token = await env.BOT_MEMORY.get(cacheKey);
+    const token = await getSeaTalkToken(env);
 
-    if (!token) {
-      const tokenRes = await fetch("https://openapi.seatalk.io/auth/app_access_token", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ app_id: env.SEATALK_APP_ID, app_secret: env.SEATALK_APP_SECRET })
-      });
-      const tokenData = await tokenRes.json();
-      token = tokenData.app_access_token;
-      await env.BOT_MEMORY.put(cacheKey, token, { expirationTtl: 7000 });
-    }
+    // 2. Konversi Buffer ke Base64
+    const base64Image = arrayBufferToBase64(buffer);
 
-    // 2. Konversi Buffer (Gambar PNG) secara aman menjadi Base64
-    let binary = '';
-    const bytes = new Uint8Array(buffer);
-    const len = bytes.byteLength;
-    for (let i = 0; i < len; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    const base64Image = btoa(binary);
-
-    // 3. Kirim base64 secara LANGSUNG sebagai pesan ke User/Grup
+    // 3. Kirim base64 sebagai pesan gambar
     const endpoint = isGroup 
       ? "https://openapi.seatalk.io/messaging/v2/group_chat" 
       : "https://openapi.seatalk.io/messaging/v2/single_chat";
 
     const requestBase = isGroup ? { group_id: targetId } : { employee_code: targetId };
+    
+    // Coba beberapa variant format gambar yang didukung SeaTalk
     const messageVariants = [
       { tag: "image", image_base64: { content: base64Image } },
       { tag: "image", image: { base64: base64Image } },
@@ -176,6 +234,7 @@ export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threa
       console.log("DEBUG API SeaTalk Send Response:", sendData);
       lastError = sendData;
 
+      // Jika error bukan karena format, stop retry
       if (sendData.code !== 4003 || typeof sendData.message !== "string" || !sendData.message.includes("Message cannot be empty")) {
         continue;
       }

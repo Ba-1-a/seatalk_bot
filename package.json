@@ -1,1 +1,18 @@
-{"name":"seatalk-bot","version":"1.0.0","description":"Virtual Assistant SOC Arjawinangun","main":"index.js","type":"module","scripts":{"deploy":"wrangler deploy"},"dependencies":{"better-sqlite3":"^12.10.0","googleapis":"^121.0.0","jose":"^5.10.0","puppeteer":"^24.15.0"},"devDependencies":{"wrangler":"^4.98.0"}}
+{
+  "name": "seatalk-bot",
+  "version": "1.0.0",
+  "description": "VASA - Virtual Assistant SOC Arjawinangun",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "jose": "^5.10.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.98.0"
+  }
+}
