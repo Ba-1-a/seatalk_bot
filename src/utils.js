@@ -164,7 +164,45 @@ function arrayBufferToBase64(buffer) {
 }
 
 /**
- * Kirim gambar ke user SeaTalk via base64
+ * Upload file ke SeaTalk Open API
+ * @param {Object} env - Environment variables
+ * @param {ArrayBuffer} buffer - Buffer file (PNG)
+ * @param {String} filename - Nama file
+ * @returns {String} file_key dari SeaTalk
+ */
+async function uploadFileToSeatalk(env, buffer, filename = "screenshot.png") {
+  const token = await getSeaTalkToken(env);
+  
+  // Konversi ArrayBuffer ke Blob lalu ke File
+  const uint8Array = new Uint8Array(buffer);
+  const blob = new Blob([uint8Array], { type: "image/png" });
+  
+  // Gunakan FormData untuk upload
+  const formData = new FormData();
+  formData.append("file", blob, filename);
+
+  const uploadRes = await fetch("https://openapi.seatalk.io/openapi/file/upload", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${token}`
+    },
+    body: formData
+  });
+
+  const uploadData = await uploadRes.json();
+  console.log("DEBUG: SeaTalk file upload response:", JSON.stringify(uploadData));
+
+  if (!uploadData?.data?.file_key) {
+    throw new Error("Gagal upload file ke SeaTalk: " + JSON.stringify(uploadData));
+  }
+
+  return uploadData.data.file_key;
+}
+
+/**
+ * Kirim gambar ke user SeaTalk via file upload
+ * Alur: Upload file -> Dapatkan file_key -> Kirim pesan dengan file_key
+ * 
  * @param {Object} env - Environment variables
  * @param {ArrayBuffer} buffer - Buffer gambar (PNG)
  * @param {String} targetId - ID target
@@ -174,73 +212,51 @@ function arrayBufferToBase64(buffer) {
  */
 export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threadId) {
   try {
-    // 1. Ambil Token SeaTalk
+    // 1. Upload file ke SeaTalk -> dapatkan file_key
+    const fileKey = await uploadFileToSeatalk(env, buffer);
+    console.log("DEBUG: file_key obtained:", fileKey);
+
+    // 2. Kirim pesan dengan file_key
     const token = await getSeaTalkToken(env);
-
-    // 2. Konversi Buffer ke Base64
-    const base64Image = arrayBufferToBase64(buffer);
-
-    // 3. Kirim base64 sebagai pesan gambar
     const endpoint = isGroup 
       ? "https://openapi.seatalk.io/messaging/v2/group_chat" 
       : "https://openapi.seatalk.io/messaging/v2/single_chat";
 
-    const requestBase = isGroup ? { group_id: targetId } : { employee_code: targetId };
-    
-    // Coba beberapa variant format gambar yang didukung SeaTalk
-    const messageVariants = [
-      { tag: "image", image_base64: { content: base64Image } },
-      { tag: "image", image: { base64: base64Image } },
-      { tag: "image", image: { base64: base64Image, type: "image/png" } },
-      { tag: "image", image: { content: base64Image } },
-      { tag: "image", image: { content: base64Image, type: "image/png" } },
-      { tag: "image", image_base64: base64Image },
-      { tag: "image", image: { data: base64Image } },
-      { tag: "image", image: { data: base64Image, type: "image/png" } },
-      { tag: "image", image_base64: { data: base64Image } }
-    ];
+    const requestBase = isGroup 
+      ? { group_id: targetId } 
+      : { employee_code: targetId };
 
-    let lastError = null;
-
-    for (const variant of messageVariants) {
-      const requestBody = { ...requestBase, message: variant };
-      if (isGroup && threadId && threadId !== "") {
-        requestBody.thread_id = threadId;
+    const requestBody = {
+      ...requestBase,
+      message: {
+        tag: "image",
+        file_key: fileKey
       }
+    };
 
-      console.log("DEBUG: SeaTalk image request variant", {
-        message: {
-          tag: variant.tag,
-          payloadType: variant.image ? "image" : "image_base64",
-          contentLength: (variant.image?.base64 || variant.image?.content || variant.image_base64?.content || variant.image_base64 || "").length,
-          hasType: Boolean(variant.image?.type)
-        }
-      });
-
-      const sendRes = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
-        },
-        body: JSON.stringify(requestBody)
-      });
-
-      const sendData = await sendRes.json();
-      if (sendData.code === 0) {
-        return sendData;
-      }
-
-      console.log("DEBUG API SeaTalk Send Response:", sendData);
-      lastError = sendData;
-
-      // Jika error bukan karena format, stop retry
-      if (sendData.code !== 4003 || typeof sendData.message !== "string" || !sendData.message.includes("Message cannot be empty")) {
-        continue;
-      }
+    if (isGroup && threadId && threadId !== "") {
+      requestBody.thread_id = threadId;
     }
 
-    throw new Error("Gagal mengirim pesan gambar: " + (lastError?.message || "Unknown error"));
+    console.log("DEBUG: Sending image with file_key:", { targetId, isGroup, fileKey });
+
+    const sendRes = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+
+    const sendData = await sendRes.json();
+    console.log("DEBUG: SeaTalk send image response:", JSON.stringify(sendData));
+
+    if (sendData.code !== 0) {
+      throw new Error("Gagal kirim gambar: code=" + sendData.code + " msg=" + sendData.message);
+    }
+
+    return sendData;
 
   } catch (error) {
     console.error("DEBUG: Error di sendScreenshotToUser:", error.message);
