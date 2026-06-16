@@ -19,6 +19,10 @@
 
 import { replyToUser, sendScreenshotToUser } from './utils.js';
 import { importPKCS8, SignJWT } from 'jose';
+import { createLogger, SERVICES } from './logger.js';
+
+const googleLog = createLogger(SERVICES.GOOGLE);
+const vercelLog = createLogger(SERVICES.VERCEL);
 
 // ============================================================
 // GOOGLE AUTHENTICATION
@@ -32,7 +36,7 @@ async function parseJsonResponse(response, context) {
     try {
         return JSON.parse(text);
     } catch (err) {
-        console.error(`DEBUG: Invalid JSON from ${context}. status=${response.status} body=${text.substring(0, 300)}`);
+        googleLog.error(`Invalid JSON from ${context}`, { status: response.status, body: text.substring(0, 300) });
         return null;
     }
 }
@@ -45,7 +49,10 @@ async function getGoogleToken(env) {
     const cacheKey = "google_oauth_token";
     try {
         const cachedToken = await env.BOT_MEMORY.get(cacheKey);
-        if (cachedToken) return cachedToken;
+        if (cachedToken) {
+            googleLog.debug('Google OAuth token loaded from cache');
+            return cachedToken;
+        }
     } catch (err) {}
 
     const now = Math.floor(Date.now() / 1000);
@@ -53,6 +60,7 @@ async function getGoogleToken(env) {
     if (!env.GOOGLE_PRIVATE_KEY) {
         throw new Error("GOOGLE_PRIVATE_KEY belum di-set di Cloudflare Workers. Jalankan: npx wrangler secret put GOOGLE_PRIVATE_KEY");
     }
+    googleLog.info('Generating new Google OAuth token via JWT');
     
     let pemKey = env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
     const privateKey = await importPKCS8(pemKey, 'RS256');
@@ -75,6 +83,7 @@ async function getGoogleToken(env) {
         throw new Error("Tidak dapat mengambil token Google");
     }
     await env.BOT_MEMORY.put(cacheKey, data.access_token, { expirationTtl: 3000 });
+    googleLog.info('Google OAuth token obtained and cached');
     return data.access_token;
 }
 
@@ -149,6 +158,7 @@ export async function silentReadSheetForAI(env, spreadsheetId, tabName = "") {
     });
     const metaData = await parseJsonResponse(metaRes, `Sheets metadata for ${spreadsheetId}`);
     const sheets = metaData?.sheets || [];
+    googleLog.debug(`Spreadsheet metadata loaded: ${sheets.length} sheets`, { spreadsheetId });
     if (sheets.length === 0) return null;
 
     let targetSheetTitle = sheets[0].properties.title;
@@ -199,7 +209,7 @@ async function exportSheetToPdf(env, spreadsheetId, tabName = "") {
     }
 
     const sheetGid = targetSheet.properties.sheetId;
-    console.log(`Exporting PDF: ${spreadsheetId} / ${targetSheet.properties.title} (GID: ${sheetGid})`);
+    googleLog.info('Exporting sheet to PDF', { spreadsheetId, sheetTitle: targetSheet.properties.title, sheetGid });
 
     // 3. Export sebagai PDF menggunakan Google Drive API
     // Parameter:
@@ -216,12 +226,12 @@ async function exportSheetToPdf(env, spreadsheetId, tabName = "") {
 
     if (!pdfRes.ok) {
         const errorText = await pdfRes.text();
-        console.error(`PDF export error: status=${pdfRes.status} body=${errorText.substring(0, 300)}`);
+        googleLog.error('PDF export failed', { status: pdfRes.status, body: errorText.substring(0, 300), spreadsheetId });
         throw new Error(`Gagal export PDF: HTTP ${pdfRes.status}`);
     }
 
     const pdfBuffer = await pdfRes.arrayBuffer();
-    console.log(`PDF buffer size: ${pdfBuffer.byteLength} bytes`);
+    googleLog.info('PDF exported successfully', { spreadsheetId, sizeBytes: pdfBuffer.byteLength });
 
     if (pdfBuffer.byteLength < 100) {
         throw new Error("PDF hasil export tidak valid atau kosong.");
@@ -231,8 +241,8 @@ async function exportSheetToPdf(env, spreadsheetId, tabName = "") {
     const header = new Uint8Array(pdfBuffer.slice(0, 5));
     const pdfSignature = [0x25, 0x50, 0x44, 0x46, 0x2D];
     if (!pdfSignature.every((byte, index) => header[index] === byte)) {
-        console.log(`Invalid PDF signature, hex: ${Array.from(header).map(b => b.toString(16)).join(' ')}`);
-        throw new Error("File hasil export bukan PDF yang valid.");
+        const hex = Array.from(header).map(b => b.toString(16)).join(' ');
+        throw new Error(`File hasil export bukan PDF yang valid. Hex: ${hex}`);
     }
 
     return pdfBuffer;
@@ -264,7 +274,7 @@ async function convertPdfToPng(pdfBuffer, env) {
     
     const vercelUrl = env.VERCEL_PDF_TO_PNG_URL || "https://seatalkbot.vercel.app/api/pdf-to-png";
     
-    console.log(`Mengirim PDF ke Vercel: ${vercelUrl} (${Math.round(pdfBuffer.byteLength / 1024)}KB)`);
+    vercelLog.info('Sending PDF to Vercel for conversion', { url: vercelUrl, sizeKB: Math.round(pdfBuffer.byteLength / 1024) });
     
     const response = await fetch(vercelUrl, {
         method: "POST",
@@ -278,17 +288,19 @@ async function convertPdfToPng(pdfBuffer, env) {
 
     if (!response.ok) {
         const errorText = await response.text();
+        vercelLog.error('Vercel PDF-to-PNG conversion failed', { status: response.status, body: errorText.substring(0, 200) });
         throw new Error(`Vercel PDF-to-PNG gagal: HTTP ${response.status} - ${errorText.substring(0, 200)}`);
     }
 
     const contentType = response.headers.get("content-type") || "";
     if (!contentType.includes("image/png") && !contentType.includes("image")) {
         const text = await response.text();
+        vercelLog.error('Vercel returned wrong content type', { contentType, body: text.substring(0, 200) });
         throw new Error(`Vercel mengembalikan format salah: ${contentType} - ${text.substring(0, 200)}`);
     }
 
     const pngBuffer = await response.arrayBuffer();
-    console.log(`PNG buffer diterima: ${pngBuffer.byteLength} bytes`);
+    vercelLog.info('PNG received from Vercel', { sizeBytes: pngBuffer.byteLength });
 
     if (pngBuffer.byteLength < 100) {
         throw new Error("PNG hasil convert terlalu kecil/rusak.");
@@ -316,15 +328,15 @@ async function convertPdfToPng(pdfBuffer, env) {
  */
 export async function generateSheetPng(env, spreadsheetId, tabName = "", customRange = null) {
     // Gunakan alur: Export PDF -> Kirim ke Vercel -> Dapatkan PNG
-    console.log(`generateSheetPng: Exporting sheet ${spreadsheetId}/${tabName} ke PDF dulu...`);
+    googleLog.info('generateSheetPng: Starting', { spreadsheetId, tabName });
     
     // STEP 1: Export spreadsheet ke PDF (gratis via Google Drive API)
     const pdfBuffer = await exportSheetToPdf(env, spreadsheetId, tabName);
-    console.log(`PDF berhasil di-export: ${pdfBuffer.byteLength} bytes`);
+    googleLog.info('PDF exported', { sizeBytes: pdfBuffer.byteLength });
 
     // STEP 2: Convert PDF ke PNG via Vercel endpoint
     const pngBuffer = await convertPdfToPng(pdfBuffer, env);
-    console.log(`PNG berhasil di-convert: ${pngBuffer.byteLength} bytes`);
+    vercelLog.info('PNG converted', { sizeBytes: pngBuffer.byteLength });
     
     return pngBuffer;
 }
@@ -445,7 +457,7 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         : tokens;
     const { tabName, customRange } = parseScreenshotArguments(tokensForTabAndRange);
     
-    console.log(`Screenshot command: sheetId=${sheetId} tabName="${tabName}" customRange=${customRange}`);
+    googleLog.info('Screenshot command received', { sheetId, tabName, customRange });
     
     // Kirim pesan "processing"
     await replyToUser(env, "⏳ Sedang memproses screenshot...", targetId, isGroup, threadId, originalMessageId);
@@ -453,11 +465,11 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
     try {
         // STEP 1: Export ke PDF via Google Drive API
         const pdfBuffer = await exportSheetToPdf(env, sheetId, tabName);
-        console.log(`PDF berhasil di-export: ${pdfBuffer.byteLength} bytes`);
+        googleLog.info('Screenshot: PDF exported', { sizeBytes: pdfBuffer.byteLength, sheetId });
 
         // STEP 2: Convert PDF ke PNG via Vercel
         const pngBuffer = await convertPdfToPng(pdfBuffer, env);
-        console.log(`PNG berhasil di-convert: ${pngBuffer.byteLength} bytes`);
+        vercelLog.info('Screenshot: PNG converted', { sizeBytes: pngBuffer.byteLength });
         
         // STEP 3: Kirim PNG ke SeaTalk
         await sendScreenshotToUser(env, pngBuffer, targetId, isGroup, threadId);
@@ -465,7 +477,7 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         await replyToUser(env, "✅ Screenshot berhasil dikirim!", targetId, isGroup, threadId, originalMessageId);
         
     } catch (err) {
-        console.error("Screenshot error:", err);
+        googleLog.error('Screenshot command failed', err);
         await replyToUser(env, `❌ Gagal membuat screenshot: ${err.message}`, targetId, isGroup, threadId, originalMessageId);
     }
 }
@@ -482,7 +494,7 @@ export async function getHourlyReportData(env) {
  * Placeholder untuk fitur inventory
  */
 export async function handleInventoryQuery(env, targetId, text, isGroup, threadId, originalMessageId) {
-    console.log("DEBUG: handleInventoryQuery dipanggil.");
+    googleLog.info('Inventory query received (placeholder)');
     await replyToUser(env, "📦 Fitur inventory sedang dalam pengembangan.", targetId, isGroup, threadId, originalMessageId);
     return null;
 }

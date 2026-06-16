@@ -9,6 +9,10 @@
  * - Support multiple model (gratis via CF Workers)
  */
 
+import { createLogger, SERVICES } from './logger.js';
+
+const log = createLogger(SERVICES.AI);
+
 // Katalog Model AI yang digunakan (Gratis via CF Workers)
 export const AI_MODELS = {
   CHAT_GENERAL: '@cf/meta/llama-4-scout-17b-16e-instruct',  // Model utama yang pintar dan ramah
@@ -33,9 +37,10 @@ export async function getAiReply(env, systemPrompt, history, model = AI_MODELS.C
       ],
       max_tokens: 1500 // Ditingkatkan untuk menampung data spreadsheet
     });
+    log.debug('AI reply received', { model, responseLen: (aiResponse.response || '').length });
     return aiResponse.response || "Maaf, sistem AI tidak memberikan respon.";
   } catch (err) {
-    console.log(`DEBUG: Error AI Handler (${model}):`, err.message);
+    log.error('AI Handler error', { model, error: err.message });
     return "Maaf, konekeksi ke jaringan AI sedang sibuk. Mohon coba lagi.";
   }
 }
@@ -58,9 +63,10 @@ export async function summarizeContext(env, currentContext, oldHistory) {
         { role: "user", content: prompt }
       ]
     });
+    log.debug('Context summarized', { model: AI_MODELS.SUMMARY_FAST });
     return summaryResponse.response || currentContext;
   } catch (err) {
-    console.log(`DEBUG: Error Summarize:`, err.message);
+    log.error('Summarize error', err);
     return currentContext; // Jika gagal, tetap gunakan context lama
   }
 }

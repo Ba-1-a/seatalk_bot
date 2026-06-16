@@ -23,6 +23,9 @@ import puppeteer from 'puppeteer-core';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { createLogger, SERVICES } from '../src/logger.js';
+
+const log = createLogger(SERVICES.VERCEL);
 
 export const config = {
   runtime: 'nodejs'
@@ -40,6 +43,8 @@ function isValidBase64(value) {
 }
 
 export default async function handler(req, res) {
+  log.requestIn(req.method, '/api/pdf-to-png');
+
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed. Use POST.' });
   }
@@ -52,6 +57,7 @@ export default async function handler(req, res) {
     const normalizedPdfBase64 = normalizePdfBase64(pdf_base64);
 
     if (!normalizedPdfBase64 || !isValidBase64(normalizedPdfBase64)) {
+      log.warn('Invalid base64 PDF received');
       return res.status(400).json({ error: 'pdf_base64 wajib diisi dan harus valid.' });
     }
 
@@ -60,8 +66,11 @@ export default async function handler(req, res) {
 
     const pdfBuffer = Buffer.from(normalizedPdfBase64, 'base64');
     if (pdfBuffer.length === 0 || pdfBuffer.toString('ascii', 0, 4) !== '%PDF') {
+      log.warn('Invalid PDF file detected', { sizeBytes: pdfBuffer.length });
       return res.status(400).json({ error: 'pdf_base64 bukan file PDF valid.' });
     }
+
+    log.info('Processing PDF', { sizeKB: Math.round(pdfBuffer.length / 1024), page: pageNumber, scale: scaleFactor });
 
     // Simpan PDF ke file temp untuk dibaca Chromium
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vasa-pdf-to-png-'));
@@ -79,6 +88,7 @@ export default async function handler(req, res) {
         deviceScaleFactor: scaleFactor
       }
     });
+    log.debug('Chromium browser launched');
 
     const pageHandle = await browser.newPage();
     await pageHandle.setViewport({
@@ -87,22 +97,18 @@ export default async function handler(req, res) {
       deviceScaleFactor: scaleFactor
     });
 
-    // Buat HTML page yang embed PDF via object tag
-    // Ini lebih reliable daripada langsung buka file:// PDF di headless Chromium
-    const htmlContent = `<!DOCTYPE html>
-<html><head><style>
-  * { margin: 0; padding: 0; }
-  body { width: 1440px; min-height: 900px; overflow: hidden; }
-  embed { width: 100%; height: 100vh; }
-</style></head>
-<body>
-  <embed type="application/pdf" src="${pdfPath}#page=${pageNumber}" width="100%" height="100%">
-</body></html>`;
+    // Navigasi langsung ke file PDF (Chromium bisa render PDF natif)
+    // JANGAN pakai <embed> atau <object> - PDF plugin tidak ada di headless mode
+    const fileUrl = `file://${pdfPath}`;
+    console.log(`Navigating to PDF: ${fileUrl}#page=${pageNumber}`);
 
-    await pageHandle.setContent(htmlContent, { waitUntil: 'load', timeout: 30000 });
+    await pageHandle.goto(`${fileUrl}#page=${pageNumber}`, {
+      waitUntil: 'networkidle2',
+      timeout: 30000
+    });
 
-    // Tunggu render
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    // Tunggu render PDF
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
     await pageHandle.evaluate(async () => {
       if (document.fonts && document.fonts.ready) {
@@ -116,12 +122,14 @@ export default async function handler(req, res) {
       omitBackground: false
     });
 
+    log.info('Screenshot generated successfully', { sizeBytes: pngBuffer.length });
+
     return res
       .status(200)
       .setHeader('Content-Type', 'image/png')
       .send(pngBuffer);
   } catch (error) {
-    console.error('PDF to PNG error:', error);
+    log.error('PDF to PNG conversion failed', error);
     return res.status(500).json({ error: error?.message || 'Gagal convert PDF ke PNG.' });
   } finally {
     if (browser) {

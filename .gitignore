@@ -26,3 +26,8 @@ screenshots/*.pdf
 Thumbs.db
 .vercel
 .env*
+
+# Logs
+logs/*.log
+logs/*.json
+!logs/.gitkeep

@@ -11,6 +11,10 @@
  * - Smart chunking untuk pesan panjang
  */
 
+import { createLogger, SERVICES } from './logger.js';
+
+const log = createLogger(SERVICES.SEATALK);
+
 /**
  * Extract teks dari berbagai format pesan SeaTalk
  * @param {Object} message - Object pesan dari SeaTalk
@@ -78,11 +82,12 @@ async function getSeaTalkToken(env) {
     
     const tokenData = await tokenRes.json();
     if (!tokenData.app_access_token) {
-      console.log("DEBUG: Gagal mendapatkan token SeaTalk", tokenData);
+      log.error('Failed to obtain SeaTalk token', tokenData);
       throw new Error("Gagal autentikasi SeaTalk");
     }
     token = tokenData.app_access_token;
     await env.BOT_MEMORY.put(cacheKey, token, { expirationTtl: 7000 });
+    log.debug('SeaTalk token obtained (new)');
   }
   
   return token;
@@ -108,6 +113,8 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
   let body = isGroup ? { group_id: targetId } : { employee_code: targetId };
   body.message = { tag: "text", text: { content: messageText } };
 
+  log.debug('Reply to user', { targetId, isGroup, textLen: messageText.length });
+
   if (isGroup) {
     if (threadId && threadId !== "") {
       body.thread_id = threadId;
@@ -125,7 +132,9 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
     body: JSON.stringify(body)
   });
 
-  return await resp.json();
+  const result = await resp.json();
+  log.apiResponse('replyToUser', result.code || 0, { targetId });
+  return result;
 }
 
 /**
@@ -135,7 +144,8 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
  */
 export async function sendSystemWebhook(webhookUrl, messageText) {
   try {
-    await fetch(webhookUrl, {
+    log.debug('Sending system webhook', { url: webhookUrl.substring(0, 60) });
+    const resp = await fetch(webhookUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -143,8 +153,9 @@ export async function sendSystemWebhook(webhookUrl, messageText) {
         text: { content: messageText }
       })
     });
+    log.debug('System webhook sent', { status: resp.status });
   } catch (error) {
-    console.log("DEBUG: Gagal mengirim webhook system account", error.message);
+    log.error('Failed to send system webhook', error);
   }
 }
 
@@ -164,44 +175,8 @@ function arrayBufferToBase64(buffer) {
 }
 
 /**
- * Upload file ke SeaTalk Open API
- * @param {Object} env - Environment variables
- * @param {ArrayBuffer} buffer - Buffer file (PNG)
- * @param {String} filename - Nama file
- * @returns {String} file_key dari SeaTalk
- */
-async function uploadFileToSeatalk(env, buffer, filename = "screenshot.png") {
-  const token = await getSeaTalkToken(env);
-  
-  // Konversi ArrayBuffer ke Blob lalu ke File
-  const uint8Array = new Uint8Array(buffer);
-  const blob = new Blob([uint8Array], { type: "image/png" });
-  
-  // Gunakan FormData untuk upload
-  const formData = new FormData();
-  formData.append("file", blob, filename);
-
-  const uploadRes = await fetch("https://openapi.seatalk.io/openapi/file/upload", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${token}`
-    },
-    body: formData
-  });
-
-  const uploadData = await uploadRes.json();
-  console.log("DEBUG: SeaTalk file upload response:", JSON.stringify(uploadData));
-
-  if (!uploadData?.data?.file_key) {
-    throw new Error("Gagal upload file ke SeaTalk: " + JSON.stringify(uploadData));
-  }
-
-  return uploadData.data.file_key;
-}
-
-/**
- * Kirim gambar ke user SeaTalk via file upload
- * Alur: Upload file -> Dapatkan file_key -> Kirim pesan dengan file_key
+ * Kirim gambar ke user SeaTalk via base64 inline
+ * Kirim gambar langsung sebagai base64 di message body (tanpa upload endpoint)
  * 
  * @param {Object} env - Environment variables
  * @param {ArrayBuffer} buffer - Buffer gambar (PNG)
@@ -212,11 +187,11 @@ async function uploadFileToSeatalk(env, buffer, filename = "screenshot.png") {
  */
 export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threadId) {
   try {
-    // 1. Upload file ke SeaTalk -> dapatkan file_key
-    const fileKey = await uploadFileToSeatalk(env, buffer);
-    console.log("DEBUG: file_key obtained:", fileKey);
+    // Konversi buffer ke base64
+    const base64 = arrayBufferToBase64(buffer);
+    log.info('Image converted to base64', { sizeBytes: buffer.byteLength, base64Len: base64.length });
 
-    // 2. Kirim pesan dengan file_key
+    // Kirim pesan dengan base64 inline (SeaTalk API format)
     const token = await getSeaTalkToken(env);
     const endpoint = isGroup 
       ? "https://openapi.seatalk.io/messaging/v2/group_chat" 
@@ -229,8 +204,8 @@ export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threa
     const requestBody = {
       ...requestBase,
       message: {
-        tag: "image",
-        file_key: fileKey
+        tag: "file",
+        file: { content: base64, filename: "screenshot.png" }
       }
     };
 
@@ -238,7 +213,7 @@ export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threa
       requestBody.thread_id = threadId;
     }
 
-    console.log("DEBUG: Sending image with file_key:", { targetId, isGroup, fileKey });
+    log.info('Sending image to SeaTalk', { targetId, isGroup });
 
     const sendRes = await fetch(endpoint, {
       method: "POST",
@@ -250,16 +225,17 @@ export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threa
     });
 
     const sendData = await sendRes.json();
-    console.log("DEBUG: SeaTalk send image response:", JSON.stringify(sendData));
+    log.apiResponse('sendImage', sendData.code || 0, { targetId });
 
     if (sendData.code !== 0) {
       throw new Error("Gagal kirim gambar: code=" + sendData.code + " msg=" + sendData.message);
     }
+    log.info('Image sent successfully', { targetId });
 
     return sendData;
 
   } catch (error) {
-    console.error("DEBUG: Error di sendScreenshotToUser:", error.message);
+    log.error('Error in sendScreenshotToUser', error);
     throw error;
   }
 }

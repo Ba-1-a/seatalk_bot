@@ -22,10 +22,16 @@
 import { handleGeneralChat } from './src/botCoding.js';
 import { extractIncomingText, sendSystemWebhook, replyToUser } from './src/utils.js';
 import { getHourlyReportData, handleInventoryQuery, handleSetSheet, handleReadSheet, handleScreenshotCommand } from './src/botSheet.js';
+import { createLogger, SERVICES, getLogFileInfo } from './src/logger.js';
+
+const log = createLogger(SERVICES.CORE);
 
 export default {
   // 1. GERBANG MASUK CHAT (WEBHOOK SEATALK)
   async fetch(request, env, ctx) {
+    const reqId = crypto.randomUUID().slice(0, 8);
+    const reqLog = log.child({ reqId });
+
     if (request.method !== "POST") return new Response("Bot Active", { status: 200 });
 
     try {
@@ -34,6 +40,7 @@ export default {
 
       // Handle seatalk_challenge untuk verifikasi webhook
       if (payload.event_type === "event_verification") {
+        reqLog.info('Webhook verification challenge');
         return new Response(JSON.stringify({ "seatalk_challenge": event.seatalk_challenge }), {
           status: 200, headers: { "Content-Type": "application/json" }
         });
@@ -50,29 +57,38 @@ export default {
       const incomingText = extractIncomingText(message);
       if (!incomingText) return new Response("OK", { status: 200 });
 
+      reqLog.info('Incoming message', { senderId, groupId, isGroup, messageId, text: incomingText.substring(0, 80) });
+
       // Routing Command
       if (incomingText.startsWith("/inventory")) {
+        reqLog.info('Routing → /inventory');
         await handleInventoryQuery(env, targetId, incomingText, isGroup, threadId, messageId);
       } else if (incomingText.startsWith("/setsheet")) {
+        reqLog.info('Routing → /setsheet');
         await handleSetSheet(env, targetId, incomingText, isGroup, threadId, messageId);
       } else if (incomingText.startsWith("/readsheet")) {
+        reqLog.info('Routing → /readsheet');
         await handleReadSheet(env, targetId, incomingText, isGroup, threadId, messageId);
       } else if (incomingText.startsWith("/screenshot")) {
+        reqLog.info('Routing → /screenshot');
         // ALUR: Export PDF (Google Drive API) -> Vercel PDF-to-PNG -> Kirim PNG ke SeaTalk
         await handleScreenshotCommand(env, targetId, incomingText, isGroup, threadId, messageId);
       } else {
+        reqLog.info('Routing → /general-chat (AI)');
         await handleGeneralChat(env, targetId, incomingText, isGroup, threadId, messageId);
       }
 
+      reqLog.info('Request completed');
       return new Response("OK", { status: 200 });
     } catch (err) {
-      console.error("Worker Error:", err);
+      reqLog.error('Worker error', err);
       return new Response("Error", { status: 500 });
     }
   },
 
   // 2. CRON JOBS
   async scheduled(event, env, ctx) {
+    const cronLog = log.child({ cron: true });
     try {
       const now = new Date();
       const currentMinute = now.toLocaleString("en-US", { timeZone: "Asia/Jakarta", minute: "numeric" });
@@ -87,6 +103,8 @@ export default {
       const jobsToRun = cronJobs.filter(job => job.minute === targetMinute);
 
       if (jobsToRun.length > 0) {
+        cronLog.info(`Running ${jobsToRun.length} cron jobs at minute ${targetMinute}`, { jobCount: jobsToRun.length, targetMinute });
+        
         // Ambil data laporan dari GSheets via modul botSheet
         const reportText = await getHourlyReportData(env);
         
@@ -94,10 +112,10 @@ export default {
         await Promise.all(
           jobsToRun.map(job => sendSystemWebhook(job.webhookUrl, reportText))
         );
-        console.log(`DEBUG: Menjalankan ${jobsToRun.length} jadwal cron pada menit ke-${targetMinute}`);
+        cronLog.info(`Cron jobs completed`, { sent: jobsToRun.length });
       }
     } catch (err) {
-      console.error("Cron Error:", err);
+      cronLog.error('Cron error', err);
     }
   }
 };

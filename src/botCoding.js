@@ -14,7 +14,10 @@
 
 import { getAiReply, summarizeContext, AI_MODELS } from './aiHandler.js';
 import { replyToUser, countWords, smartChunkMessage } from './utils.js';
-import { silentReadSheetForAI, extractSpreadsheetId, handleScreenshotCommand } from './botSheet.js'; 
+import { silentReadSheetForAI, extractSpreadsheetId, handleScreenshotCommand } from './botSheet.js';
+import { createLogger, SERVICES } from './logger.js';
+
+const log = createLogger(SERVICES.CORE);
 
 /**
  * Deteksi apakah user meminta screenshot dalam natural language
@@ -75,7 +78,7 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
     
     // 0a. Deteksi intent screenshot dari natural language
     if (detectScreenshotIntent(text)) {
-      console.log(`DEBUG: Screenshot intent detected in text: "${text.substring(0, 50)}..."`);
+      log.info('Screenshot intent detected', { text: text.substring(0, 50) });
       
       // Cek apakah user punya default sheet
       const defaultSheetId = await env.BOT_MEMORY.get(`default_sheet_${targetId}`);
@@ -115,7 +118,7 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
         session = JSON.parse(rawMem);
       }
     } catch (e) {
-      console.log("DEBUG: Memori baru dimulai atau gagal parse KV.");
+      log.debug('Memory session not found or parse failed, starting fresh', { targetId });
     }
 
     // 2. Ringkas riwayat percakapan lama jika melebihi batas 6 pesan
@@ -177,6 +180,6 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
     }
 
   } catch (err) {
-    console.log("DEBUG: Error di handleGeneralChat:", err.message);
+    log.error('Error in handleGeneralChat', err);
   }
 }
