@@ -1,19 +1,19 @@
 /**
  * api/pdf-to-png.js
  * VASA - Virtual Assistant SOC Arjawinangun
- * Vercel endpoint untuk convert PDF ke PNG menggunakan Puppeteer + pdfjs-dist.
+ * Vercel endpoint untuk convert PDF ke PNG.
  * 
  * ARSITEKTUR:
  * - Cloudflare Worker export spreadsheet ke PDF via Google Drive API
  * - Kirim PDF (base64) ke endpoint ini
- * - Vercel render PDF via pdfjs-dist (dari node_modules) di Puppeteer browser
- * - pdfjs-dist di-inline ke HTML (no CDN, reliable di Vercel)
+ * - Vercel render PDF menggunakan pdfjs-dist via page.setContent()
+ * - page.setContent() tidak punya batasan size data: URI
  * 
- * Kenapa inline pdfjs-dist:
- * - @sparticuz/chromium tidak support Chrome PDF viewer (ERR_ABORTED)
- * - Vercel serverless kadang tidak bisa fetch CDN
- * - pdfjs-dist di-inject langsung dari node_modules sebagai <script>
- * - Render PDF asli ke canvas (bukan HTML rekonstruksi!)
+ * Kenapa page.setContent() bukan data: URI:
+ * - data: URI dengan pdfjs-dist ~1.5MB menyebabkan ERR_ABORTED
+ * - page.setContent() inject HTML langsung tanpa encoding URI
+ * - @sparticuz/chromium tidak support navigasi ke PDF (ERR_ABORTED)
+ * - Tapi support JavaScript canvas dengan baik
  * 
  * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
@@ -31,90 +31,61 @@ export const config = {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/**
- * Load pdfjs-dist v3 UMD build dari node_modules
- * V3 menggunakan pola UMD: <script src="pdf.min.js"> -> window.pdfjsLib tersedia
- */
-function loadPdfjsBundle() {
-  // Coba legacy build dulu, fallback ke build biasa
-  let pdfjsPath = path.resolve(__dirname, '../node_modules/pdfjs-dist/build/pdf.min.js');
-  let workerPath = path.resolve(__dirname, '../node_modules/pdfjs-dist/build/pdf.worker.min.js');
-  
-  if (!fs.existsSync(pdfjsPath)) {
-    pdfjsPath = path.resolve(__dirname, '../node_modules/pdfjs-dist/legacy/build/pdf.min.js');
-    workerPath = path.resolve(__dirname, '../node_modules/pdfjs-dist/legacy/build/pdf.worker.min.js');
-  }
-  
-  console.log(`Loading pdfjs from: ${pdfjsPath}`);
-  const pdfjsContent = fs.readFileSync(pdfjsPath, 'utf-8');
-  const workerContent = fs.readFileSync(workerPath, 'utf-8');
-  
-  return { pdfjsContent, workerContent };
-}
-
-function buildHtml(pdfBase64, pdfjsCode, workerCode) {
+function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
+  // Embed pdf.min.js content and worker as blob URL
   return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body { background: #e8e8e8; font-family: sans-serif; padding: 20px; }
-  .page-wrap { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,0.15); margin: 0 auto 20px auto; overflow: hidden; }
-  .page-wrap canvas { display: block; }
-  #status { text-align: center; padding: 20px; color: #666; }
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#e8e8e8;font-family:sans-serif;padding:20px}
+.pw{background:#fff;box-shadow:0 2px 8px rgba(0,0,0,0.15);margin:0 auto 20px auto;overflow:hidden}
+.pw canvas{display:block}
+#s{text-align:center;padding:20px;color:#666}
 </style>
 </head>
 <body>
-<div id="status">Loading PDF...</div>
-<div id="pages"></div>
+<div id="s">Loading PDF...</div>
+<div id="c"></div>
 <script>
-// pdfjs-dist v3 UMD - di-inject langsung dari node_modules
+// pdfjs-dist v3 UMD bundle inline
 ${pdfjsCode}
 </script>
 <script>
-(function() {
-  // Worker juga di-inject sebagai blob URL
-  var workerBlob = new Blob([${JSON.stringify(workerCode)}], { type: 'application/javascript' });
-  var workerUrl = URL.createObjectURL(workerBlob);
-  pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
-  
-  var b64 = '${pdfBase64}';
-  var bytes = Uint8Array.from(atob(b64), function(c) { return c.charCodeAt(0); });
-  
-  pdfjsLib.getDocument({ data: bytes }).promise.then(async function(pdf) {
-    var container = document.getElementById('pages');
-    var statusEl = document.getElementById('status');
-    statusEl.textContent = 'Rendering ' + pdf.numPages + ' halaman...';
-    
-    for (var i = 1; i <= pdf.numPages; i++) {
-      statusEl.textContent = 'Halaman ' + i + '/' + pdf.numPages + '...';
-      var page = await pdf.getPage(i);
-      var viewport = page.getViewport({ scale: 2 });
-      
-      var wrap = document.createElement('div');
-      wrap.className = 'page-wrap';
-      wrap.style.width = viewport.width + 'px';
-      
-      var canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
-      wrap.appendChild(canvas);
-      container.appendChild(wrap);
-      
-      var ctx = canvas.getContext('2d');
-      ctx.fillStyle = '#FFFFFF';
-      ctx.fillRect(0, 0, viewport.width, viewport.height);
-      
-      await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+(function(){
+  // Setup worker via blob URL
+  var wb = new Blob([${JSON.stringify(workerCode)}], {type:'application/javascript'});
+  var wu = URL.createObjectURL(wb);
+  pdfjsLib.GlobalWorkerOptions.workerSrc = wu;
+
+  // Read PDF from base64 embedded in page
+  var b64 = ${JSON.stringify(pdfBase64)};
+  var bytes = Uint8Array.from(atob(b64), function(c){return c.charCodeAt(0)});
+
+  pdfjsLib.getDocument({data: bytes}).promise.then(async function(pdf){
+    var c=document.getElementById('c'), s=document.getElementById('s');
+    s.textContent='Rendering '+pdf.numPages+' pages...';
+    for(var i=1;i<=pdf.numPages;i++){
+      s.textContent='Page '+i+'/'+pdf.numPages+'...';
+      var page=await pdf.getPage(i);
+      var vp=page.getViewport({scale:2});
+      var w=document.createElement('div');
+      w.className='pw'; w.style.width=vp.width+'px';
+      var cv=document.createElement('canvas');
+      cv.width=vp.width; cv.height=vp.height;
+      w.appendChild(cv); c.appendChild(w);
+      var ctx=cv.getContext('2d');
+      ctx.fillStyle='#FFFFFF';
+      ctx.fillRect(0,0,vp.width,vp.height);
+      await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
-    
-    statusEl.textContent = 'Selesai';
-    document.body.dataset.ready = 'true';
-    URL.revokeObjectURL(workerUrl);
-  }).catch(function(err) {
-    document.getElementById('status').textContent = 'Error: ' + err.message;
-    document.body.dataset.error = err.message;
+    s.textContent='Selesai';
+    URL.revokeObjectURL(wu);
+    document.body.dataset.ready='true';
+  }).catch(function(e){
+    document.getElementById('s').textContent='Error: '+e.message;
+    document.body.dataset.error=e.message;
   });
 })();
 </script>
@@ -129,9 +100,17 @@ export default async function handler(req, res) {
 
   try {
     // Load pdfjs-dist dari node_modules
-    console.log('Loading pdfjs-dist v3 from node_modules...');
-    const { pdfjsContent, workerContent } = loadPdfjsBundle();
-    console.log(`pdfjs: ${pdfjsContent.length}B, worker: ${workerContent.length}B`);
+    const buildDir = path.resolve(__dirname, '../node_modules/pdfjs-dist/build');
+    let pdfjsPath = path.join(buildDir, 'pdf.min.js');
+    let workerPath = path.join(buildDir, 'pdf.worker.min.js');
+    if (!fs.existsSync(pdfjsPath)) {
+      const legacyDir = path.resolve(__dirname, '../node_modules/pdfjs-dist/legacy/build');
+      pdfjsPath = path.join(legacyDir, 'pdf.min.js');
+      workerPath = path.join(legacyDir, 'pdf.worker.min.js');
+    }
+    console.log(`pdfjs: ${pdfjsPath}`);
+    const pdfjsCode = fs.readFileSync(pdfjsPath, 'utf-8');
+    const workerCode = fs.readFileSync(workerPath, 'utf-8');
 
     // Get PDF buffer
     const ct = req.headers['content-type'] || '';
@@ -161,23 +140,20 @@ export default async function handler(req, res) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 2 });
 
-    // Load HTML (pdfjs-dist inline, no external deps!)
-    const html = buildHtml(b64, pdfjsContent, workerContent);
-    await page.goto('data:text/html;charset=utf-8,' + encodeURIComponent(html), {
-      waitUntil: 'networkidle0',
-      timeout: 90000
-    });
+    // Use page.setContent() instead of data: URI to avoid size limits
+    const html = buildHtmlViewer(b64, pdfjsCode, workerCode);
+    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 });
 
-    // Wait for render
+    // Wait for PDF render
     console.log('Waiting for PDF render...');
     try {
-      await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 60000 });
+      await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 120000 });
     } catch (e) {
       const err = await page.evaluate(() => document.body.dataset.error || null);
       if (err) throw new Error('PDF render error: ' + err);
       console.log('Timeout, proceeding...');
     }
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 3000));
 
     // Screenshot
     const png = await page.screenshot({ type: 'png', fullPage: true, omitBackground: false });
