@@ -13,13 +13,16 @@
  * Response: image/png
  */
 
-import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import * as pdfjsLib from 'pdfjs-dist';
 import chromium from '@sparticuz/chromium';
 import puppeteer from 'puppeteer-core';
 
 export const config = {
   runtime: 'nodejs'
 };
+
+// Set PDF.js worker ke CDN (hindari masalah worker file di serverless)
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs`;
 
 function normalizePdfBase64(value) {
   if (typeof value !== 'string') return null;
