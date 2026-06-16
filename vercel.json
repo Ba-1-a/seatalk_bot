@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/pdf-to-png.js": {
-      "runtime": "@vercel/node"
+      "maxDuration": 30
     }
   }
 }
