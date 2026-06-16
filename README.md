@@ -1,6 +1,6 @@
 # VASA - Virtual Assistant SOC Arjawinangun
 
-Bot SeaTalk berbasis Cloudflare Workers dengan fitur AI, Google Sheets integration, dan screenshot spreadsheet asli (bukan HTML rekonstruksi).
+Bot SeaTalk berbasis Cloudflare Workers dengan fitur AI, Google Sheets integration, dan screenshot spreadsheet asli via PDF.
 
 ## Arsitektur
 
@@ -25,9 +25,9 @@ Bot SeaTalk berbasis Cloudflare Workers dengan fitur AI, Google Sheets integrati
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         VERCEL (Helper PDF→PNG)                      │
 │                                                                     │
-│  /api/pdf-to-png.js → Puppeteer render PDF native di Chrome → PNG  │
+│  /api/pdf-to-png.js → Puppeteer + pdfjs-dist inline render PDF     │
 │                                                                     │
-│  ALUR SCREENSHOT YANG BENAR (TANPA FREEMIUM):                       │
+│  ALUR SCREENSHOT:                                                   │
 │                                                                     │
 │  1. Export spreadsheet ke PDF via Google Drive API (GRATIS!)        │
 │     ↓ Google Drive export mempertahankan FORMAT ASLI spreadsheet    │
@@ -35,26 +35,20 @@ Bot SeaTalk berbasis Cloudflare Workers dengan fitur AI, Google Sheets integrati
 │                                                                     │
 │  2. Kirim PDF (base64) ke Vercel endpoint /api/pdf-to-png           │
 │                                                                     │
-│  3. Vercel render PDF native di Chrome                              │
-│     ↓ BUKAN HTML rekonstruksi! Chrome native PDF viewer             │
-│     ↓ Mempertahankan 100% fidelity dokumen asli                     │
+│  3. Vercel render PDF via pdfjs-dist inline (dari node_modules)     │
+│     ↓ Render PDF asli ke HTML5 Canvas (bukan HTML rekonstruksi!)    │
 │                                                                     │
-│  4. Vercel screenshot → PNG → kirim balik ke Worker                │
+│  4. Vercel screenshot halaman canvas → PNG → kirim balik ke Worker  │
 │                                                                     │
 │  5. Worker kirim PNG ke SeaTalk via base64 inline                   │
-│                                                                     │
-│  KENAPA INI BENAR:                                                  │
-│  - "Jangan render lewat HTML, tapi benar-benar ambil screenshot"    │
-│  - Google Drive API export PDF GRATIS, tanpa freemium               │
-│  - Chrome native PDF viewer != HTML buatan                          │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Fitur Utama
 
 - **Chat AI** - Menggunakan Cloudflare Workers AI (gratis, tanpa daftar kartu kredit)
-- **Google Sheets Integration** - Baca, export spreadsheet
-- **Screenshot Spreadsheet ASLI** - Export spreadsheet ke PDF (Google Drive API) → PNG (Chrome native render) - BUKAN HTML rekonstruksi
+- **Google Sheets Integration** - Baca data spreadsheet (text) & screenshot (PDF→PNG)
+- **Screenshot Spreadsheet ASLI** - Export ke PDF (Google Drive API) → PNG (pdfjs-dist render canvas) - BUKAN HTML rekonstruksi
 - **Memory** - Simpan konteks percakapan per user/grup di KV
 - **Cron Jobs** - Jadwalkan laporan otomatis
 - **Auto-Threading** - Jawaban panjang otomatis di-thread di grup
@@ -65,7 +59,7 @@ Bot SeaTalk berbasis Cloudflare Workers dengan fitur AI, Google Sheets integrati
 |---------|-----------|--------|
 | `/setsheet <url>` | Simpan spreadsheet | `/setsheet https://docs.google.com/spreadsheets/d/xxx` |
 | `/readsheet [tab]` | Baca data spreadsheet (text mode) | `/readsheet Sheet1` |
-| `/screenshot [tab]` | Screenshot spreadsheet ASLI via PDF | `/screenshot Sheet1` |
+| `/screenshot [tab]` | Screenshot spreadsheet via PDF | `/screenshot Sheet1` |
 | `/inventory` | Fitur inventory (coming soon) | `/inventory` |
 | `<teks bebas>` | Chat dengan AI | Apa kabar? |
 
@@ -103,7 +97,7 @@ vercel --prod
 ├── index.js              # Entry point Worker (Event Callback SeaTalk)
 ├── wrangler.toml         # Konfigurasi Cloudflare Workers
 ├── api/
-│   └── pdf-to-png.js     # Vercel endpoint PDF→PNG (Puppeteer, render native Chrome)
+│   └── pdf-to-png.js     # Vercel endpoint PDF→PNG (Puppeteer + pdfjs-dist inline)
 ├── src/
 │   ├── aiHandler.js      # AI model management (Cloudflare Workers AI)
 │   ├── botCoding.js      # Chat flow & memory management
@@ -113,17 +107,28 @@ vercel --prod
 ├── secrets.json          # Backup kredensial (jangan commit ke public!)
 ├── package.json          # Dependencies
 ├── deploy.sh             # Script deploy lengkap
-├── vercel.json           # Konfigurasi Vercel (maxDuration: 60s untuk Puppeteer)
+├── vercel.json           # Konfigurasi Vercel (maxDuration: 60s)
 └── README.md             # Dokumentasi ini
 ```
 
 ## Catatan Penting
 
 - **Tidak ada API freemium** - Semua screenshot via Google Drive API export PDF (GRATIS)
-- **Tidak render HTML** - Chrome native PDF viewer, bukan HTML table rekonstruksi
+- **Tidak render HTML** - pdfjs-dist render PDF asli ke canvas, bukan HTML table rekonstruksi
 - **Tidak perlu kartu kredit** - Cloudflare Workers AI gratis tanpa perlu daftar KK
-- **Seatlak Challenge** - Worker sudah handle `seatalk_challenge` untuk verifikasi webhook (`index.js` baris 42-47)
+- **Seatalk Challenge** - Worker sudah handle `seatalk_challenge` untuk verifikasi webhook
 - **Token OAuth** Google di-cache di KV (~50 menit)
 - **Memory percakapan** disimpan di KV dengan TTL 1 jam
 - **Service Account** Google harus di-share ke spreadsheet yang akan diakses
-- **Vercel timeout** diset ke 60 detik (cukup untuk Puppeteer render PDF)
+- **Vercel timeout** diset ke 60 detik (cukup untuk pdfjs-dist render canvas)
+- **pdfjs-dist v3.11.174** digunakan karena versi UMD bisa di-inject via `<script>` tag tanpa dynamic import
+
+## Kelemahan yang Diketahui
+
+1. **Screenshot seluruh halaman (ignore custom range)** - Parameter range seperti `A1:D20` tidak mempengaruhi output PDF karena Google Drive API export selalu menghasilkan PDF dari seluruh sheet. Untuk screenshot sebagian, perlu dipotong manual nantinya.
+
+2. **Duplikasi screenshot (5 kali kirim)** - Jika user mengirim perintah `/screenshot` dan Worker sedang memproses, request kedua dari SeaTalk (retry mechanism) akan memicu proses screenshot lagi. Hal ini menyebabkan beberapa screenshot terkirim. Solusi: implementasi deduplication/rate limiting di Worker.
+
+3. **Waktu proses lama (~50 detik)** - Karena pdfjs-dist harus render setiap halaman PDF ke canvas satu per satu di Puppeteer. Spreadsheet dengan banyak baris membutuhkan waktu lebih lama.
+
+4. **Worker timeout 100 detik** - Cloudflare Worker gratis memiliki batas CPU time 10-30 detik untuk request. Screenshot besar mungkin timeout sebelum selesai.
