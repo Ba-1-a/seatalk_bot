@@ -3,16 +3,17 @@
  * VASA - Virtual Assistant SOC Arjawinangun
  * Engine pemrosesan Google Sheets dan screenshot
  * 
- * ALUR SCREENSHOT (TANPA FREEMIUM):
- * 1. Export spreadsheet ke PDF via Google Drive API (gratis)
- * 2. Kirim PDF ke Vercel endpoint /api/pdf-to-png untuk di-convert ke PNG (puppeteer)
- * 3. Kirim PNG ke SeaTalk via base64
+ * ALUR SCREENSHOT (TANPA FREEMIUM, TANPA PDF):
+ * 1. Fetch data langsung dari Google Sheets API (gratis) - BUKAN export PDF
+ * 2. Kirim JSON rows ke Vercel endpoint /api/pdf-to-png
+ * 3. Vercel render HTML table + screenshot PNG
+ * 4. Kirim PNG ke SeaTalk via file upload
  * 
  * FITUR:
  * - Autentikasi Google Service Account (JWT)
  * - Baca data spreadsheet untuk AI
- * - Export spreadsheet ke PDF via Google Drive API
- * - Convert PDF ke PNG via Vercel Puppeteer endpoint
+ * - Fetch data spreadsheet (tanpa PDF conversion)
+ * - Convert data rows ke PNG via Vercel Puppeteer
  * - Kirim screenshot ke SeaTalk
  * - Handler command: /setsheet, /readsheet, /screenshot
  */
@@ -175,22 +176,23 @@ export async function silentReadSheetForAI(env, spreadsheetId, tabName = "") {
 }
 
 // ============================================================
-// PDF EXPORT (Google Drive API - GRATIS)
+// SHEET DATA FETCH (langsung dari Google Sheets API - GRATIS)
 // ============================================================
 
 /**
- * Export Google Sheets ke PDF menggunakan Google Drive API
- * Ini GRATIS dan tidak perlu API key pihak ketiga
+ * Fetch data langsung dari Google Sheets API
+ * Tidak perlu export PDF - kirim JSON rows langsung ke Vercel
  * 
  * @param {Object} env - Environment variables
  * @param {String} spreadsheetId - ID spreadsheet
  * @param {String} tabName - Nama tab (optional)
- * @returns {ArrayBuffer} PDF file buffer
+ * @param {String} customRange - Range kustom (optional)
+ * @returns {Object} { title, rows }
  */
-async function exportSheetToPdf(env, spreadsheetId, tabName = "") {
+async function fetchSheetData(env, spreadsheetId, tabName = "", customRange = null) {
     const token = await getGoogleToken(env);
     
-    // 1. Dapatkan metadata spreadsheet untuk mencari sheet GID
+    // 1. Dapatkan metadata spreadsheet
     const metaRes = await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}`, { 
         headers: { "Authorization": `Bearer ${token}` } 
     });
@@ -201,95 +203,82 @@ async function exportSheetToPdf(env, spreadsheetId, tabName = "") {
         throw new Error("Spreadsheet tidak memiliki sheet.");
     }
 
-    // 2. Cari sheet berdasarkan nama atau gunakan sheet pertama
+    // 2. Cari sheet target
     let targetSheet = sheets[0];
     if (tabName) {
         const foundSheet = sheets.find(s => s.properties.title.toLowerCase().includes(tabName.toLowerCase()));
         if (foundSheet) targetSheet = foundSheet;
     }
 
-    const sheetGid = targetSheet.properties.sheetId;
-    googleLog.info('Exporting sheet to PDF', { spreadsheetId, sheetTitle: targetSheet.properties.title, sheetGid });
-
-    // 3. Export sebagai PDF menggunakan Google Drive API
-    // Parameter:
-    // - format=pdf: export sebagai PDF
-    // - gid: sheet ID (untuk sheet tertentu)
-    // - portrait=false: landscape (lebih lebar, cocok untuk spreadsheet)
-    // - fitw=true: fit to width
-    // - gridlines=false: sembunyikan gridlines
-    const exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=pdf&gid=${sheetGid}&portrait=false&fitw=true&gridlines=false`;
+    const targetSheetTitle = targetSheet.properties.title;
     
-    const pdfRes = await fetch(exportUrl, {
-        headers: { "Authorization": `Bearer ${token}` }
-    });
-
-    if (!pdfRes.ok) {
-        const errorText = await pdfRes.text();
-        googleLog.error('PDF export failed', { status: pdfRes.status, body: errorText.substring(0, 300), spreadsheetId });
-        throw new Error(`Gagal export PDF: HTTP ${pdfRes.status}`);
+    // 3. Tentukan range
+    let range = customRange || 'A1:Z50';
+    if (!customRange) {
+        const gridProps = targetSheet.properties.gridProperties;
+        if (gridProps) {
+            const maxRow = Math.min(gridProps.rowCount || 50, 100);
+            const maxCol = Math.min(gridProps.columnCount || 26, 26);
+            const endCol = String.fromCharCode(64 + maxCol);
+            range = `A1:${endCol}${maxRow}`;
+        }
     }
 
-    const pdfBuffer = await pdfRes.arrayBuffer();
-    googleLog.info('PDF exported successfully', { spreadsheetId, sizeBytes: pdfBuffer.byteLength });
+    googleLog.info('Fetching sheet data', { spreadsheetId, targetSheetTitle, range });
 
-    if (pdfBuffer.byteLength < 100) {
-        throw new Error("PDF hasil export tidak valid atau kosong.");
+    // 4. Ambil data
+    const dataRes = await fetch(
+        `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(targetSheetTitle)}!${range}`, 
+        { headers: { "Authorization": `Bearer ${token}` } }
+    );
+    const sheetData = await parseJsonResponse(dataRes, `Sheets values for ${spreadsheetId}`);
+    const values = sheetData?.values || [];
+
+    if (values.length === 0) {
+        throw new Error("Tidak ada data dalam spreadsheet.");
     }
 
-    // Validasi PDF signature (%PDF-)
-    const header = new Uint8Array(pdfBuffer.slice(0, 5));
-    const pdfSignature = [0x25, 0x50, 0x44, 0x46, 0x2D];
-    if (!pdfSignature.every((byte, index) => header[index] === byte)) {
-        const hex = Array.from(header).map(b => b.toString(16)).join(' ');
-        throw new Error(`File hasil export bukan PDF yang valid. Hex: ${hex}`);
-    }
+    googleLog.info('Sheet data fetched', { rowCount: values.length });
 
-    return pdfBuffer;
+    return { title: targetSheetTitle, rows: values };
 }
 
 // ============================================================
-// PDF TO PNG CONVERSION (via Vercel Puppeteer)
+// SCREENSHOT via Vercel (kirim data JSON, bukan PDF)
 // ============================================================
 
 /**
- * Convert PDF ke PNG menggunakan Vercel endpoint /api/pdf-to-png
- * Ini adalah alur baru tanpa freemium API:
- * 1. Export sheet ke PDF (Google Drive API - gratis)
- * 2. Kirim PDF base64 ke Vercel endpoint (puppeteer)
- * 3. Dapatkan PNG buffer
+ * Kirim data rows ke Vercel untuk di-render sebagai HTML table + screenshot PNG
+ * ALUR: Fetch data dari API -> Kirim JSON ke Vercel -> Dapatkan PNG
+ * Tidak perlu PDF conversion, tidak perlu pdfjs-dist!
  * 
- * @param {ArrayBuffer} pdfBuffer - Buffer PDF
+ * @param {Object} sheetData - { title, rows }
  * @param {Object} env - Environment variables
  * @returns {ArrayBuffer} PNG buffer
  */
-async function convertPdfToPng(pdfBuffer, env) {
-    // Konversi PDF buffer ke base64
-    let binary = '';
-    const bytes = new Uint8Array(pdfBuffer);
-    for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
-    }
-    const base64Pdf = btoa(binary);
-    
+async function convertSheetDataToPng(sheetData, env) {
     const vercelUrl = env.VERCEL_PDF_TO_PNG_URL || "https://seatalkbot.vercel.app/api/pdf-to-png";
     
-    vercelLog.info('Sending PDF to Vercel for conversion', { url: vercelUrl, sizeKB: Math.round(pdfBuffer.byteLength / 1024) });
+    vercelLog.info('Sending sheet data to Vercel for screenshot', { 
+        url: vercelUrl, 
+        title: sheetData.title, 
+        rows: sheetData.rows.length 
+    });
     
     const response = await fetch(vercelUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-            pdf_base64: base64Pdf,
-            page: 1,
+            sheet_title: sheetData.title,
+            rows: sheetData.rows,
             scale: 2
         })
     });
 
     if (!response.ok) {
         const errorText = await response.text();
-        vercelLog.error('Vercel PDF-to-PNG conversion failed', { status: response.status, body: errorText.substring(0, 200) });
-        throw new Error(`Vercel PDF-to-PNG gagal: HTTP ${response.status} - ${errorText.substring(0, 200)}`);
+        vercelLog.error('Vercel screenshot conversion failed', { status: response.status, body: errorText.substring(0, 200) });
+        throw new Error(`Vercel screenshot gagal: HTTP ${response.status} - ${errorText.substring(0, 200)}`);
     }
 
     const contentType = response.headers.get("content-type") || "";
@@ -315,9 +304,9 @@ async function convertPdfToPng(pdfBuffer, env) {
 
 /**
  * Generate PNG dari spreadsheet
- * ALUR BARU (TANPA FREEMIUM):
- * 1. Export spreadsheet ke PDF via Google Drive API (gratis)
- * 2. Kirim PDF ke Vercel untuk di-convert ke PNG (puppeteer)
+ * ALUR BARU (TANPA FREEMIUM, TANPA FILE:// DEPENDENCY):
+ * 1. Fetch data langsung dari Google Sheets API (GRATIS)
+ * 2. Kirim JSON rows ke Vercel untuk di-render HTML + screenshot
  * 3. Kirim PNG ke SeaTalk
  * 
  * @param {Object} env - Environment variables
@@ -327,16 +316,15 @@ async function convertPdfToPng(pdfBuffer, env) {
  * @returns {ArrayBuffer} PNG image buffer
  */
 export async function generateSheetPng(env, spreadsheetId, tabName = "", customRange = null) {
-    // Gunakan alur: Export PDF -> Kirim ke Vercel -> Dapatkan PNG
-    googleLog.info('generateSheetPng: Starting', { spreadsheetId, tabName });
+    googleLog.info('generateSheetPng: Starting', { spreadsheetId, tabName, customRange });
     
-    // STEP 1: Export spreadsheet ke PDF (gratis via Google Drive API)
-    const pdfBuffer = await exportSheetToPdf(env, spreadsheetId, tabName);
-    googleLog.info('PDF exported', { sizeBytes: pdfBuffer.byteLength });
+    // STEP 1: Fetch data langsung dari Google Sheets API
+    const sheetData = await fetchSheetData(env, spreadsheetId, tabName, customRange);
+    googleLog.info('Sheet data fetched', { title: sheetData.title, rows: sheetData.rows.length });
 
-    // STEP 2: Convert PDF ke PNG via Vercel endpoint
-    const pngBuffer = await convertPdfToPng(pdfBuffer, env);
-    vercelLog.info('PNG converted', { sizeBytes: pngBuffer.byteLength });
+    // STEP 2: Kirim data ke Vercel untuk di-render HTML + screenshot
+    const pngBuffer = await convertSheetDataToPng(sheetData, env);
+    vercelLog.info('PNG from Vercel', { sizeBytes: pngBuffer.byteLength });
     
     return pngBuffer;
 }
@@ -435,10 +423,10 @@ function parseScreenshotArguments(tokens) {
 
 /**
  * Handler untuk command /screenshot
- * ALUR BARU (TANPA FREEMIUM):
- * 1. Export spreadsheet ke PDF via Google Drive API (gratis)
- * 2. Kirim PDF ke Vercel untuk di-convert ke PNG (puppeteer)
- * 3. Kirim PNG ke SeaTalk via base64
+ * ALUR BARU (TANPA PDF, TANPA FREEMIUM):
+ * 1. Fetch data langsung dari Google Sheets API (GRATIS)
+ * 2. Kirim JSON rows ke Vercel untuk di-render HTML + screenshot
+ * 3. Upload PNG ke SeaTalk
  */
 export async function handleScreenshotCommand(env, targetId, text, isGroup, threadId, originalMessageId) {
     const args = text.replace(/^\S+\s*/, "").trim();
@@ -463,15 +451,15 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
     await replyToUser(env, "⏳ Sedang memproses screenshot...", targetId, isGroup, threadId, originalMessageId);
     
     try {
-        // STEP 1: Export ke PDF via Google Drive API
-        const pdfBuffer = await exportSheetToPdf(env, sheetId, tabName);
-        googleLog.info('Screenshot: PDF exported', { sizeBytes: pdfBuffer.byteLength, sheetId });
+        // STEP 1: Fetch data langsung dari Google Sheets API (BUKAN export PDF)
+        const sheetData = await fetchSheetData(env, sheetId, tabName, customRange);
+        googleLog.info('Screenshot: Sheet data fetched', { title: sheetData.title, rows: sheetData.rows.length });
 
-        // STEP 2: Convert PDF ke PNG via Vercel
-        const pngBuffer = await convertPdfToPng(pdfBuffer, env);
-        vercelLog.info('Screenshot: PNG converted', { sizeBytes: pngBuffer.byteLength });
+        // STEP 2: Kirim data rows ke Vercel untuk di-render HTML + screenshot
+        const pngBuffer = await convertSheetDataToPng(sheetData, env);
+        vercelLog.info('Screenshot: PNG from Vercel', { sizeBytes: pngBuffer.byteLength });
         
-        // STEP 3: Kirim PNG ke SeaTalk
+        // STEP 3: Upload dan kirim PNG ke SeaTalk
         await sendScreenshotToUser(env, pngBuffer, targetId, isGroup, threadId);
         
         await replyToUser(env, "✅ Screenshot berhasil dikirim!", targetId, isGroup, threadId, originalMessageId);
