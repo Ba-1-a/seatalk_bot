@@ -86,7 +86,9 @@ export default async function handler(req, res) {
       deviceScaleFactor: scaleFactor
     });
 
-    await pageHandle.goto(`file://${pdfPath}#page=${pageNumber}`, {
+    // Gunakan data URL agar Chromium tidak perlu akses filesystem lokal
+    const dataUrl = `data:application/pdf;base64,${normalizedPdfBase64}`;
+    await pageHandle.goto(`${dataUrl}#page=${pageNumber}`, {
       waitUntil: 'networkidle0',
       timeout: 30000
     });
