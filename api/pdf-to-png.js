@@ -6,27 +6,104 @@
  * ARSITEKTUR:
  * - Cloudflare Worker export spreadsheet ke PDF via Google Drive API
  * - Kirim PDF (base64) ke endpoint ini
- * - Vercel tulis PDF ke file sementara, render di Chrome native PDF viewer (file://)
- * - Screenshot PNG, kirim balik
+ * - Vercel render PDF via Puppeteer + pdfjs-dist canvas rendering
  * 
- * KENAPA file:// bukan data: URIs:
- * - Chrome headless PDF viewer (chrome://pdf) TIDAK support data: URIs (ERR_ABORTED)
- * - file:// protocol didukung penuh oleh Chrome native PDF viewer
- * - @sparticuz/chromium menyediakan akses ke /tmp di Vercel
+ * KENAPA Pendekatan ini:
+ * - @sparticuz/chromium TIDAK support navigasi langsung ke PDF viewer
+ * - Chrome headless ERR_ABORTED untuk PDF URI
+ * - pdfjs-dist render halaman PDF ke canvas -> PNG buffer
+ * - Gabungkan semua halaman jadi satu PNG
  * 
  * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
  */
 
-import chromium from '@sparticuz/chromium';
 import puppeteer from 'puppeteer-core';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
+import chromium from '@sparticuz/chromium';
 
 export const config = {
   runtime: 'nodejs'
 };
+
+/**
+ * Buat HTML page yang render PDF menggunakan pdfjs-dist (CDN JS)
+ * Setiap halaman PDF di-render ke canvas, lalu di-screenshot
+ */
+function buildPdfViewerHtml(pdfBase64) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { 
+    background: #e8e8e8; 
+    font-family: sans-serif;
+    padding: 20px;
+  }
+  .page-container {
+    background: white;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    margin: 0 auto 20px auto;
+    page-break-after: always;
+  }
+  .page-container canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+  .status {
+    text-align: center;
+    padding: 20px;
+    color: #666;
+  }
+</style>
+</head>
+<body>
+<div id="status" class="status">Loading PDF...</div>
+<div id="pages"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.min.js"></script>
+<script>
+pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.js';
+
+const pdfBase64 = '${pdfBase64}';
+const pdfBytes = Uint8Array.from(atob(pdfBase64), c => c.charCodeAt(0));
+
+pdfjsLib.getDocument({ data: pdfBytes }).promise.then(async (pdf) => {
+  const container = document.getElementById('pages');
+  const status = document.getElementById('status');
+  status.textContent = '';
+  
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const viewport = page.getViewport({ scale: 2 });
+    
+    const pageDiv = document.createElement('div');
+    pageDiv.className = 'page-container';
+    pageDiv.style.width = viewport.width + 'px';
+    pageDiv.style.height = viewport.height + 'px';
+    
+    const canvas = document.createElement('canvas');
+    canvas.width = viewport.width;
+    canvas.height = viewport.height;
+    pageDiv.appendChild(canvas);
+    container.appendChild(pageDiv);
+    
+    const ctx = canvas.getContext('2d');
+    await page.render({ canvasContext: ctx, viewport: viewport }).promise;
+  }
+  
+  // Tandai selesai untuk Puppeteer
+  document.body.dataset.ready = 'true';
+}).catch(err => {
+  document.getElementById('status').textContent = 'Error: ' + err.message;
+  document.body.dataset.error = err.message;
+});
+</script>
+</body>
+</html>`;
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -34,7 +111,6 @@ export default async function handler(req, res) {
   }
 
   let browser;
-  let tempPdfPath = null;
 
   try {
     // ============================================================
@@ -50,7 +126,6 @@ export default async function handler(req, res) {
       }
       pdfBuffer = Buffer.from(pdf_base64, 'base64');
     } else {
-      // Raw binary
       const chunks = [];
       for await (const chunk of req) {
         chunks.push(chunk);
@@ -62,20 +137,11 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'PDF buffer terlalu kecil atau kosong.' });
     }
 
+    const pdfBase64 = pdfBuffer.toString('base64');
     console.log(`PDF received: ${pdfBuffer.length} bytes`);
 
     // ============================================================
-    // STEP 2: Tulis PDF ke file sementara
-    // Chrome native PDF viewer TIDAK support data: URIs di headless
-    // Tapi support file:// protocol
-    // ============================================================
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vasa-pdf-'));
-    tempPdfPath = path.join(tmpDir, 'input.pdf');
-    fs.writeFileSync(tempPdfPath, pdfBuffer);
-    console.log(`PDF written to: ${tempPdfPath}`);
-
-    // ============================================================
-    // STEP 3: Launch browser dan render PDF
+    // STEP 2: Launch browser dan render PDF viewer HTML
     // ============================================================
     const execPath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (await chromium.executablePath());
     console.log(`Chrome executable: ${execPath}`);
@@ -87,7 +153,6 @@ export default async function handler(req, res) {
         '--disable-setuid-sandbox',
         '--disable-gpu',
         '--disable-dev-shm-usage',
-        '--disable-software-rasterizer',
       ],
       executablePath: execPath,
       headless: chromium.headless,
@@ -106,25 +171,42 @@ export default async function handler(req, res) {
       deviceScaleFactor: 2
     });
 
-    // Gunakan file:// protocol (bukan data: URI) karena Chrome PDF viewer
-    // tidak mendukung data: URIs dalam mode headless
-    const pdfUrl = `file://${tempPdfPath}`;
-    console.log(`Loading PDF via: ${pdfUrl}`);
+    // Build HTML viewer dengan pdfjs-dist CDN
+    const htmlContent = buildPdfViewerHtml(pdfBase64);
+    const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(htmlContent);
 
-    await page.goto(pdfUrl, { 
+    console.log('Loading PDF viewer HTML...');
+    await page.goto(dataUrl, { 
       waitUntil: 'networkidle0', 
       timeout: 60000 
     });
 
-    // Tunggu Chrome PDF viewer selesai render halaman
-    // Chrome PDF viewer butuh waktu untuk merender tiap halaman
-    await new Promise(resolve => setTimeout(resolve, 4000));
+    // Tunggu pdfjs-dist selesai render semua halaman
+    console.log('Waiting for PDF rendering...');
+    try {
+      await page.waitForFunction(
+        () => document.body.dataset.ready === 'true',
+        { timeout: 45000 }
+      );
+    } catch (timeoutError) {
+      // Cek apakah ada error
+      const errorText = await page.evaluate(() => document.body.dataset.error || null);
+      if (errorText) {
+        throw new Error(`PDF rendering error: ${errorText}`);
+      }
+      // Jika masih loading, lanjutkan dengan screenshoot apa adanya
+      console.log('PDF rendering might still be in progress, proceeding...');
+    }
 
-    console.log('PDF rendered in Chrome native viewer');
+    // Extra wait for rendering to complete
+    await new Promise(resolve => setTimeout(resolve, 3000));
+
+    console.log('PDF rendered, taking screenshot...');
 
     // ============================================================
-    // STEP 4: Screenshot halaman PDF
+    // STEP 3: Screenshot halaman dengan PDF viewer
     // ============================================================
+    // Ambil screenshot full page (semua halaman PDF akan terlihat)
     const pngBuffer = await page.screenshot({
       type: 'png',
       fullPage: true,
@@ -142,19 +224,9 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error('PDF-to-PNG error:', error);
     return res.status(500).json({ 
-      error: error?.message || 'Gagal convert PDF ke PNG.',
-      stack: error?.stack?.substring(0, 500)
+      error: error?.message || 'Gagal convert PDF ke PNG.'
     });
   } finally {
-    // Bersihkan file sementara
-    if (tempPdfPath) {
-      try {
-        fs.unlinkSync(tempPdfPath);
-        fs.rmdirSync(path.dirname(tempPdfPath));
-      } catch (e) {
-        // Ignore cleanup errors
-      }
-    }
     if (browser) {
       await browser.close().catch(() => undefined);
     }
