@@ -5,20 +5,24 @@
  * 
  * ARSITEKTUR:
  * - Cloudflare Worker export spreadsheet ke PDF via Google Drive API
- * - Kirim PDF binary ke endpoint ini
- * - Vercel render PDF native di Chrome (bukan HTML buatan!) -> screenshot PNG
- * - Kirim PNG balik ke Cloudflare Worker
+ * - Kirim PDF (base64) ke endpoint ini
+ * - Vercel tulis PDF ke file sementara, render di Chrome native PDF viewer (file://)
+ * - Screenshot PNG, kirim balik
  * 
- * ALUR: Export PDF (Google Drive API) -> PDF to PNG (Vercel Puppeteer) -> PNG kirim ke SeaTalk
+ * KENAPA file:// bukan data: URIs:
+ * - Chrome headless PDF viewer (chrome://pdf) TIDAK support data: URIs (ERR_ABORTED)
+ * - file:// protocol didukung penuh oleh Chrome native PDF viewer
+ * - @sparticuz/chromium menyediakan akses ke /tmp di Vercel
  * 
- * Request: POST multipart/form-data dengan field "pdf" (file PDF)
- *    ATAU: POST application/octet-stream dengan body raw PDF buffer
- *    ATAU: POST application/json dengan { pdf_base64: "<base64 encoded pdf>" }
+ * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
  */
 
 import chromium from '@sparticuz/chromium';
 import puppeteer from 'puppeteer-core';
+import fs from 'fs';
+import path from 'path';
+import os from 'os';
 
 export const config = {
   runtime: 'nodejs'
@@ -30,29 +34,23 @@ export default async function handler(req, res) {
   }
 
   let browser;
+  let tempPdfPath = null;
 
   try {
     // ============================================================
-    // STEP 1: Dapatkan PDF buffer dari berbagai format input
+    // STEP 1: Dapatkan PDF buffer
     // ============================================================
-    let pdfBuffer = null;
     const contentType = req.headers['content-type'] || '';
 
+    let pdfBuffer = null;
     if (contentType.includes('application/json')) {
-      // Format JSON: { pdf_base64: "..." }
       const { pdf_base64 } = req.body || {};
       if (!pdf_base64) {
         return res.status(400).json({ error: 'pdf_base64 wajib diisi untuk format JSON.' });
       }
       pdfBuffer = Buffer.from(pdf_base64, 'base64');
-    } else if (contentType.includes('multipart/form-data')) {
-      // Format multipart: field "pdf" berisi file PDF
-      // NOTE: Vercel serverless tidak mendukung multer built-in,
-      // jadi kita gunakan raw buffer approach
-      return res.status(400).json({ error: 'Gunakan format application/octet-stream atau JSON.' });
     } else {
-      // Format raw: body adalah PDF buffer langsung
-      // Read raw body
+      // Raw binary
       const chunks = [];
       for await (const chunk of req) {
         chunks.push(chunk);
@@ -67,11 +65,31 @@ export default async function handler(req, res) {
     console.log(`PDF received: ${pdfBuffer.length} bytes`);
 
     // ============================================================
-    // STEP 2: Render PDF di Chrome native (bukan HTML buatan!)
+    // STEP 2: Tulis PDF ke file sementara
+    // Chrome native PDF viewer TIDAK support data: URIs di headless
+    // Tapi support file:// protocol
     // ============================================================
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vasa-pdf-'));
+    tempPdfPath = path.join(tmpDir, 'input.pdf');
+    fs.writeFileSync(tempPdfPath, pdfBuffer);
+    console.log(`PDF written to: ${tempPdfPath}`);
+
+    // ============================================================
+    // STEP 3: Launch browser dan render PDF
+    // ============================================================
+    const execPath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (await chromium.executablePath());
+    console.log(`Chrome executable: ${execPath}`);
+
     browser = await puppeteer.launch({
-      args: chromium.args,
-      executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (await chromium.executablePath()),
+      args: [
+        ...chromium.args,
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-gpu',
+        '--disable-dev-shm-usage',
+        '--disable-software-rasterizer',
+      ],
+      executablePath: execPath,
       headless: chromium.headless,
       ignoreHTTPSErrors: true,
       defaultViewport: {
@@ -88,23 +106,24 @@ export default async function handler(req, res) {
       deviceScaleFactor: 2
     });
 
-    // Render PDF native di Chrome menggunakan data URL
-    // Chrome native PDF viewer akan merender dengan formatting asli
-    const pdfBase64 = pdfBuffer.toString('base64');
-    const dataUrl = `data:application/pdf;base64,${pdfBase64}`;
-    
-    await page.goto(dataUrl, { 
+    // Gunakan file:// protocol (bukan data: URI) karena Chrome PDF viewer
+    // tidak mendukung data: URIs dalam mode headless
+    const pdfUrl = `file://${tempPdfPath}`;
+    console.log(`Loading PDF via: ${pdfUrl}`);
+
+    await page.goto(pdfUrl, { 
       waitUntil: 'networkidle0', 
       timeout: 60000 
     });
 
-    // Tunggu Chrome PDF viewer selesai render
-    await new Promise(resolve => setTimeout(resolve, 3000));
+    // Tunggu Chrome PDF viewer selesai render halaman
+    // Chrome PDF viewer butuh waktu untuk merender tiap halaman
+    await new Promise(resolve => setTimeout(resolve, 4000));
 
     console.log('PDF rendered in Chrome native viewer');
 
     // ============================================================
-    // STEP 3: Screenshot halaman PDF (bukan HTML buatan!)
+    // STEP 4: Screenshot halaman PDF
     // ============================================================
     const pngBuffer = await page.screenshot({
       type: 'png',
@@ -127,6 +146,15 @@ export default async function handler(req, res) {
       stack: error?.stack?.substring(0, 500)
     });
   } finally {
+    // Bersihkan file sementara
+    if (tempPdfPath) {
+      try {
+        fs.unlinkSync(tempPdfPath);
+        fs.rmdirSync(path.dirname(tempPdfPath));
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+    }
     if (browser) {
       await browser.close().catch(() => undefined);
     }
