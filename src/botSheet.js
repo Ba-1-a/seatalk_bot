@@ -49,6 +49,11 @@ async function getGoogleToken(env) {
     } catch (err) {}
 
     const now = Math.floor(Date.now() / 1000);
+    
+    if (!env.GOOGLE_PRIVATE_KEY) {
+        throw new Error("GOOGLE_PRIVATE_KEY belum di-set di Cloudflare Workers. Jalankan: npx wrangler secret put GOOGLE_PRIVATE_KEY");
+    }
+    
     let pemKey = env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
     const privateKey = await importPKCS8(pemKey, 'RS256');
 
