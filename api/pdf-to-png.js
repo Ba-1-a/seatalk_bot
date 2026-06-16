@@ -21,8 +21,9 @@ export const config = {
   runtime: 'nodejs'
 };
 
-// Set PDF.js worker ke CDN (hindari masalah worker file di serverless)
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.0.379/pdf.worker.min.mjs`;
+// Disable web worker - Node.js serverless tidak support web worker
+// pdfjs-dist bisa jalan tanpa worker (single-threaded)
+delete pdfjsLib.GlobalWorkerOptions.workerSrc;
 
 function normalizePdfBase64(value) {
   if (typeof value !== 'string') return null;
