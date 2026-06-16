@@ -12,6 +12,7 @@
   "dependencies": {
     "@sparticuz/chromium": "^149.0.0",
     "jose": "^5.10.0",
+    "pdfjs-dist": "^3.11.174",
     "puppeteer-core": "^25.1.0"
   },
   "devDependencies": {
