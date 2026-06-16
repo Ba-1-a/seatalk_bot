@@ -1,7 +1,7 @@
 {
   "functions": {
     "api/pdf-to-png.js": {
-      "maxDuration": 30
+      "maxDuration": 60
     }
   }
 }

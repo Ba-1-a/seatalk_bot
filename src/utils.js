@@ -164,7 +164,7 @@ export async function sendSystemWebhook(webhookUrl, messageText) {
  * @param {ArrayBuffer} buffer - Buffer yang akan dikonversi
  * @returns {String} Base64 string
  */
-function arrayBufferToBase64(buffer) {
+export function arrayBufferToBase64(buffer) {
   let binary = '';
   const bytes = new Uint8Array(buffer);
   const len = bytes.byteLength;
