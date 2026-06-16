@@ -3,11 +3,20 @@
  * VASA - Virtual Assistant SOC Arjawinangun
  * Cloudflare Worker sebagai Event Callback & Cron Executor
  * 
+ * ARSITEKTUR:
+ * - Cloudflare Workers = GERBANG UTAMA (Event Callback SeaTalk)
+ * - Vercel = Helper PDF-to-PNG (puppeteer) - endpoint /api/pdf-to-png
+ * - Supabase = Database (cadangan untuk log/channel config)
+ * 
+ * ALUR SCREENSHOT (TANPA FREEMIUM):
+ * 1. Export spreadsheet ke PDF via Google Drive API (gratis)
+ * 2. Kirim PDF ke Vercel endpoint /api/pdf-to-png untuk di-convert ke PNG
+ * 3. Kirim PNG ke SeaTalk via base64
+ * 
  * Fitur:
- * - Webhook callback untuk SeaTalk
- * - seatalk_challenge handler
+ * - Webhook callback untuk SeaTalk dengan seatalk_challenge handler
  * - Routing command ke handler masing-masing
- * - Cron job scheduler
+ * - Cron job scheduler untuk laporan otomatis
  */
 
 import { handleGeneralChat } from './src/botCoding.js';
@@ -49,7 +58,7 @@ export default {
       } else if (incomingText.startsWith("/readsheet")) {
         await handleReadSheet(env, targetId, incomingText, isGroup, threadId, messageId);
       } else if (incomingText.startsWith("/screenshot")) {
-        // Rute khusus Screenshot - langsung proses di Worker
+        // ALUR: Export PDF (Google Drive API) -> Vercel PDF-to-PNG -> Kirim PNG ke SeaTalk
         await handleScreenshotCommand(env, targetId, incomingText, isGroup, threadId, messageId);
       } else {
         await handleGeneralChat(env, targetId, incomingText, isGroup, threadId, messageId);

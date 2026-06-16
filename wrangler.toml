@@ -1,0 +1,33 @@
+# wrangler.toml
+# VASA - Virtual Assistant SOC Arjawinangun
+# Cloudflare Worker Configuration
+
+account_id = "2149c6a4a350952581c0f4e46b93c496"
+
+name = "seatalk-bot"
+main = "index.js"
+compatibility_date = "2024-06-15"
+compatibility_flags = [ "nodejs_compat" ]
+
+# Binding KV Storage
+[[kv_namespaces]]
+binding = "BOT_MEMORY"
+id = "ae76cdb4f12d4d719057f089f8ac2deb"
+
+# Binding AI untuk Cloudflare Workers AI
+[ai]
+binding = "AI"
+
+[vars]
+# Google Service Account Email (bukan private key - itu di secret)
+GOOGLE_CLIENT_EMAIL = "vasa-725@studio-1196053014-a94d0.iam.gserviceaccount.com"
+# Supabase Config
+SUPABASE_URL = "https://gsdtravhmqbzkwdujkve.supabase.co"
+# URL untuk Vercel PDF-to-PNG endpoint
+VERCEL_PDF_TO_PNG_URL = "https://seatalkbot.vercel.app/api/pdf-to-png"
+
+# Secrets (jangan simpan di sini, set via wrangler secret put):
+# - SEATALK_APP_ID
+# - SEATALK_APP_SECRET
+# - GOOGLE_PRIVATE_KEY
+# - SUPABASE_SERVICE_ROLE_KEY
