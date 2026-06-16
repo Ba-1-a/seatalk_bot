@@ -63,6 +63,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'pdf_base64 bukan file PDF valid.' });
     }
 
+    // Simpan PDF ke file temp untuk dibaca Chromium
     tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vasa-pdf-to-png-'));
     const pdfPath = path.join(tmpDir, 'input.pdf');
     await fs.writeFile(pdfPath, pdfBuffer);
@@ -86,15 +87,22 @@ export default async function handler(req, res) {
       deviceScaleFactor: scaleFactor
     });
 
-    // Gunakan data URL agar Chromium tidak perlu akses filesystem lokal
-    const dataUrl = `data:application/pdf;base64,${normalizedPdfBase64}`;
-    await pageHandle.goto(`${dataUrl}#page=${pageNumber}`, {
-      waitUntil: 'networkidle0',
-      timeout: 30000
-    });
+    // Buat HTML page yang embed PDF via object tag
+    // Ini lebih reliable daripada langsung buka file:// PDF di headless Chromium
+    const htmlContent = `<!DOCTYPE html>
+<html><head><style>
+  * { margin: 0; padding: 0; }
+  body { width: 1440px; min-height: 900px; overflow: hidden; }
+  embed { width: 100%; height: 100vh; }
+</style></head>
+<body>
+  <embed type="application/pdf" src="${pdfPath}#page=${pageNumber}" width="100%" height="100%">
+</body></html>`;
 
-    await pageHandle.waitForSelector('canvas, embed, object, div.viewer-page', { timeout: 15000 })
-      .catch(() => undefined);
+    await pageHandle.setContent(htmlContent, { waitUntil: 'load', timeout: 30000 });
+
+    // Tunggu render
+    await new Promise(resolve => setTimeout(resolve, 3000));
 
     await pageHandle.evaluate(async () => {
       if (document.fonts && document.fonts.ready) {
