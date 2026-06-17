@@ -40,10 +40,10 @@ function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
 <meta charset="utf-8">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{width:100%;overflow-x:hidden;background:#fff}
+html,body{background:#fff;font-family:sans-serif}
 body{font-family:sans-serif}
 #c{display:flex;flex-direction:column;align-items:flex-start;gap:0}
-.pw{display:inline-block;line-height:0;overflow:hidden}
+.pw{display:inline-block;line-height:0}
 .pw canvas{display:block;margin:0;padding:0}
 #s{display:none}
 </style>
@@ -134,17 +134,21 @@ export default async function handler(req, res) {
     const b64 = buf.toString('base64');
     console.log(`PDF: ${buf.length}B`);
 
-    // Launch browser
+    // Launch browser with 4K default viewport
+    // CRITICAL: Viewport HARUS sangat lebar untuk Tabloid landscape di scale 3x
+    // Tabloid = 432mm x 279mm → ~5100px x 3300px di 3x scale
+    // Gunakan defaultViewport yang muat
     const exe = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (await chromium.executablePath());
     browser = await puppeteer.launch({
       args: [...chromium.args, '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
       executablePath: exe,
       headless: chromium.headless,
-      defaultViewport: { width: 1440, height: 900, deviceScaleFactor: 2 }
+      defaultViewport: null  // No default - we set per-page
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width: 1440, height: 900, deviceScaleFactor: 2 });
+    // Set viewport HUGE agar muat semua konten Tabloid landscape di 3x scale
+    await page.setViewport({ width: 8000, height: 6000, deviceScaleFactor: 2 });
 
     // Use page.setContent() instead of data: URI to avoid size limits
     const html = buildHtmlViewer(b64, pdfjsCode, workerCode);
@@ -161,34 +165,14 @@ export default async function handler(req, res) {
     }
     await new Promise(r => setTimeout(r, 3000));
 
-    // Screenshot strategy: Resize viewport to match rendered canvas dimensions
-    // (no pixel-level crop - let PDF margins do the trimming)
-    // The canvas already only contains the requested range from Google Drive export
-    const contentSize = await page.evaluate(() => {
-      var container = document.getElementById('c');
-      if (!container) return null;
+    // Hide loading text
+    await page.evaluate(() => {
       document.getElementById('s').style.display = 'none';
-      var rect = container.getBoundingClientRect();
-      return {
-        width: Math.ceil(rect.width),
-        height: Math.ceil(rect.height)
-      };
     });
-
-    console.log(`Container size: ${JSON.stringify(contentSize)}`);
-
-    // Resize viewport to exact content size for clean capture
-    if (contentSize && contentSize.width > 0 && contentSize.height > 0) {
-      await page.setViewport({
-        width: contentSize.width,
-        height: contentSize.height,
-        deviceScaleFactor: 2
-      });
-      await new Promise(r => setTimeout(r, 300));
-    }
 
     var png = await page.screenshot({
       type: 'png',
+      fullPage: true,
       omitBackground: false
     });
     console.log(`PNG: ${png.length}B`);

@@ -277,46 +277,22 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&gridlines=false`;         // Sembunyikan gridlines untuk tampilan bersih
     exportUrl += `&printtitle=false`;        // Sembunyikan judul spreadsheet
     exportUrl += `&fzr=false`;               // Frozen rows tidak diulang
-    exportUrl += `&pagenum=UNDEFINED`;       // No page numbers
+    exportUrl += `&pagenum=false`;            // No page numbers
     exportUrl += `&horizontal_alignment=CENTER`; // Center horizontally
     
-    // When range is specified: hitung custom paper size dari jumlah kolom & baris
-    // agar pas tanpa scaling berlebihan atau kolom terpotong
-    // Estimasi: 1 kolom ≈ 1 inch, 1 baris ≈ 0.25 inch di PDF export
-    // Margin minimal 0.25 inch tiap sisi
+    // When range is specified: TABLOID (17"x11") landscape dengan fitw=true
+    // TABLOID adalah ukuran kertas standar terbesar yang didukung Google Drive export
+    // Landscape 17" lebar + margin 0.2" = 16.8" konten → muat 18+ kolom
     if (rangeIndices) {
-      const colCount = rangeIndices.c2 - rangeIndices.c1;
-      const rowCount = rangeIndices.r2 - rangeIndices.r1;
-      const marginX = 0.5; // total margin kiri+kanan = 0.5 inch
-      const marginY = 0.5; // total margin atas+bawah = 0.5 inch
-      const colWidth = 1.0; // inch per kolom (cukup untuk semua lebar konten)
-      const rowHeight = 0.35; // inch per baris
+      exportUrl += `&portrait=false`;        // Landscape
+      exportUrl += `&size=TABLOID`;          // 17"x11" (432x279mm) — terbesar yang didukung
+      exportUrl += `&scale=2`;               // 2 = fit width, 3 = fit height, 4 = fit page
+      exportUrl += `&top_margin=0.2`;        // Margin minimal
+      exportUrl += `&bottom_margin=0.2`;
+      exportUrl += `&left_margin=0.2`;
+      exportUrl += `&right_margin=0.2`;
       
-      let widthInch = colCount * colWidth + marginX;
-      let heightInch = rowCount * rowHeight + marginY;
-      
-      // Batasi minimum ukuran (A4 = 8.3x11.7 inch portrait)
-      // Tapi jika range kecil, jangan terlalu kecil
-      widthInch = Math.max(widthInch, 6);
-      heightInch = Math.max(heightInch, 4);
-      
-      // Tentukan orientasi dari dimensi
-      const isLandscape = widthInch > heightInch;
-      
-      exportUrl += `&portrait=${isLandscape ? 'false' : 'true'}`;
-      exportUrl += `&size=CUSTOM`;            // Custom paper size
-      exportUrl += `&width=${widthInch.toFixed(1)}`;   // Lebar custom dalam inch
-      exportUrl += `&height=${heightInch.toFixed(1)}`;  // Tinggi custom dalam inch
-      exportUrl += `&fitw=true`;              // Scale to fit width
-      exportUrl += `&fith=false`;             // Jangan force fit height
-      exportUrl += `&top_margin=0.1`;         // Minimal margin
-      exportUrl += `&bottom_margin=0.1`;
-      exportUrl += `&left_margin=0.1`;
-      exportUrl += `&right_margin=0.1`;
-      
-      googleLog.info('Custom paper size calculated', { 
-        colCount, rowCount, widthInch, heightInch, isLandscape 
-      });
+      googleLog.info('Range export: TABLOID landscape', rangeIndices);
     } else {
       exportUrl += `&portrait=true`;         // Portrait untuk full sheet
       exportUrl += `&size=A4`;               // Ukuran A4
