@@ -135,20 +135,19 @@ export default async function handler(req, res) {
     console.log(`PDF: ${buf.length}B`);
 
     // Launch browser with 4K default viewport
-    // CRITICAL: Viewport HARUS sangat lebar untuk Tabloid landscape di scale 3x
-    // Tabloid = 432mm x 279mm → ~5100px x 3300px di 3x scale
-    // Gunakan defaultViewport yang muat
+    // CRITICAL: defaultViewport HARUS diset (tidak boleh null, crash screenshot)
+    // 2560px lebar cukup untuk Tabloid landscape di scale 2x
+    // fullPage:true akan menangkap konten di luar viewport
     const exe = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (await chromium.executablePath());
     browser = await puppeteer.launch({
       args: [...chromium.args, '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
       executablePath: exe,
       headless: chromium.headless,
-      defaultViewport: null  // No default - we set per-page
+      defaultViewport: { width: 2560, height: 1440, deviceScaleFactor: 2 }
     });
 
     const page = await browser.newPage();
-    // Set viewport HUGE agar muat semua konten Tabloid landscape di 3x scale
-    await page.setViewport({ width: 8000, height: 6000, deviceScaleFactor: 2 });
+    await page.setViewport({ width: 2560, height: 1440, deviceScaleFactor: 2 });
 
     // Use page.setContent() instead of data: URI to avoid size limits
     const html = buildHtmlViewer(b64, pdfjsCode, workerCode);
