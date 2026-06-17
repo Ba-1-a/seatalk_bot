@@ -277,13 +277,25 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&portrait=true`;           // Portrait orientation
     exportUrl += `&size=A4`;                 // Ukuran A4
     exportUrl += `&fitw=true`;               // Fit to width
-    exportUrl += `&top_margin=0.5`;          // Margin
-    exportUrl += `&bottom_margin=0.5`;
-    exportUrl += `&left_margin=0.5`;
-    exportUrl += `&right_margin=0.5`;
     exportUrl += `&gridlines=false`;         // Sembunyikan gridlines untuk tampilan bersih
     exportUrl += `&printtitle=false`;        // Sembunyikan judul spreadsheet
     exportUrl += `&fzr=false`;               // Frozen rows tidak diulang
+    exportUrl += `&pagenum=UNDEFINED`;       // No page numbers
+    exportUrl += `&horizontal_alignment=CENTER`; // Center horizontally
+    
+    // When range is specified, use ZERO margins for tight crop around content
+    // When no range (full sheet), keep small margins for readability
+    if (rangeIndices) {
+      exportUrl += `&top_margin=0`;          // Zero margin for tight crop
+      exportUrl += `&bottom_margin=0`;
+      exportUrl += `&left_margin=0`;
+      exportUrl += `&right_margin=0`;
+    } else {
+      exportUrl += `&top_margin=0.5`;        // Small margin for full sheet readability
+      exportUrl += `&bottom_margin=0.5`;
+      exportUrl += `&left_margin=0.5`;
+      exportUrl += `&right_margin=0.5`;
+    }
     
     // Jika sheet GID diberikan, export sheet tertentu
     if (sheetGid !== null) {
