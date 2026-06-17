@@ -161,41 +161,111 @@ export default async function handler(req, res) {
     }
     await new Promise(r => setTimeout(r, 3000));
 
-    // Screenshot strategy:
-    // 1. Get the exact bounding box of the container that holds all canvases
-    // 2. Resize viewport to exactly match that size (no overflow, no clipping)
-    // 3. Take a clean fullPage screenshot at 1:1 CSS pixel mapping
-    // This avoids coordinate mapping issues between canvas pixels and screenshot pixels
-    const contentSize = await page.evaluate(() => {
-      const container = document.getElementById('c');
-      if (!container) return null;
-      const rect = container.getBoundingClientRect();
-      // Clean up the loading text node
+    // Screenshot strategy: Trim each canvas to its actual content bounding box
+    // so the container fits snugly around visible cells only (no PDF margin whitespace)
+    // Then resize viewport to match and take a clean screenshot
+    const finalSize = await page.evaluate(() => {
+      var container = document.getElementById('c');
+      var canvases = container.querySelectorAll('canvas');
+      if (canvases.length === 0) return null;
+
+      // Hide the status text
       document.getElementById('s').style.display = 'none';
+
+      // For each canvas, find content bounding box and trim
+      canvases.forEach(function(canvas) {
+        var ctx = canvas.getContext('2d');
+        var w = canvas.width;
+        var h = canvas.height;
+        var imageData = ctx.getImageData(0, 0, w, h);
+        var data = imageData.data;
+
+        var minX = w, minY = h, maxX = 0, maxY = 0;
+        var hasContent = false;
+        var step = 2; // Sample every 2nd pixel for speed
+
+        for (var y = 0; y < h; y += step) {
+          for (var x = 0; x < w; x += step) {
+            var idx = (y * w + x) * 4;
+            var r = data[idx], g = data[idx+1], b = data[idx+2];
+            // Non-white or non-near-white pixel
+            if (Math.abs(r - 255) > 25 || Math.abs(g - 255) > 25 || Math.abs(b - 255) > 25) {
+              if (x < minX) minX = x;
+              if (y < minY) minY = y;
+              if (x > maxX) maxX = x;
+              if (y > maxY) maxY = y;
+              hasContent = true;
+            }
+          }
+        }
+
+        if (!hasContent) return; // Skip empty canvases
+
+        // Add 2px padding around content
+        var pad = 2;
+        minX = Math.max(0, minX - pad);
+        minY = Math.max(0, minY - pad);
+        maxX = Math.min(w - 1, maxX + pad);
+        maxY = Math.min(h - 1, maxY + pad);
+
+        var newW = maxX - minX + 1;
+        var newH = maxY - minY + 1;
+
+        // Crop: draw content region into a fresh temporary canvas
+        var tempCanvas = document.createElement('canvas');
+        tempCanvas.width = newW;
+        tempCanvas.height = newH;
+        var tempCtx = tempCanvas.getContext('2d');
+        tempCtx.drawImage(canvas, minX, minY, newW, newH, 0, 0, newW, newH);
+
+        // Replace the canvas data
+        canvas.width = newW;
+        canvas.height = newH;
+        canvas.style.width = newW + 'px';
+        canvas.style.height = newH + 'px';
+        ctx.drawImage(tempCanvas, 0, 0);
+
+        // Update parent wrapper size
+        var pw = canvas.parentElement;
+        if (pw) {
+          pw.style.width = newW + 'px';
+        }
+      });
+
+      // Return final container size
+      var finalRect = container.getBoundingClientRect();
       return {
-        width: Math.ceil(rect.width),
-        height: Math.ceil(rect.height)
+        width: Math.ceil(finalRect.width),
+        height: Math.ceil(finalRect.height)
       };
     });
 
-    console.log(`Content size: ${JSON.stringify(contentSize)}`);
+    console.log(`Final content size after trimming: ${JSON.stringify(finalSize)}`);
 
     // Resize viewport to exact content size for clean capture
-    if (contentSize && contentSize.width > 0 && contentSize.height > 0) {
+    if (finalSize && finalSize.width > 0 && finalSize.height > 0) {
       await page.setViewport({
-        width: contentSize.width,
-        height: contentSize.height,
+        width: finalSize.width,
+        height: finalSize.height,
         deviceScaleFactor: 2
       });
-      // Small delay for viewport resize to take effect
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 300));
     }
 
-    const png = await page.screenshot({
-      type: 'png',
-      fullPage: true,
-      omitBackground: false
-    });
+    var png;
+    if (finalSize && finalSize.width > 0 && finalSize.height > 0) {
+      // Set viewport exactly to content so screenshot has no extra space
+      png = await page.screenshot({
+        type: 'png',
+        omitBackground: false
+      });
+    } else {
+      png = await page.screenshot({
+        type: 'png',
+        fullPage: true,
+        omitBackground: false
+      });
+    }
     console.log(`PNG: ${png.length}B`);
 
     return res.status(200)
