@@ -283,13 +283,15 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     // When range is specified: landscape + no scale + zero margins untuk tampilkan kolom sebanyak mungkin
     // When no range: portrait A4 with small margins
     if (rangeIndices) {
-      exportUrl += `&portrait=false`;        // Landscape → 297mm width (vs 210mm portrait) → cukup untuk A-R
-      exportUrl += `&size=A4`;               // Ukuran A4 landscape
-      exportUrl += `&fitw=true`;             // Scale to fit landscape width → SEMUA kolom masuk
-      exportUrl += `&top_margin=0`;          // Zero margin
-      exportUrl += `&bottom_margin=0`;
-      exportUrl += `&left_margin=0`;
-      exportUrl += `&right_margin=0`;
+      // Landscape LEDGER → 432mm lebar → cukup untuk 18+ kolom (A-R dan lebih)
+      // fitw=true akan scale konten agar muat di 432mm
+      exportUrl += `&portrait=false`;        // Landscape
+      exportUrl += `&size=TABLOID`;          // TABLOID/LEDGER = 432mm x 279mm (landscape = 432mm lebar)
+      exportUrl += `&fitw=true`;             // Scale to fit width
+      exportUrl += `&top_margin=0.1`;        // Margin minimal
+      exportUrl += `&bottom_margin=0.1`;
+      exportUrl += `&left_margin=0.1`;
+      exportUrl += `&right_margin=0.1`;
     } else {
       exportUrl += `&portrait=true`;         // Portrait untuk full sheet
       exportUrl += `&size=A4`;               // Ukuran A4
