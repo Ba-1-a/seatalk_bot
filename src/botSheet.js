@@ -274,24 +274,27 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     // Build export URL dengan parameter
     // https://docs.google.com/spreadsheets/d/{spreadsheetId}/export?format=pdf
     let exportUrl = `https://docs.google.com/spreadsheets/d/${spreadsheetId}/export?format=pdf`;
-    exportUrl += `&portrait=true`;           // Portrait orientation
-    exportUrl += `&size=A4`;                 // Ukuran A4
-    exportUrl += `&fitw=true`;               // Fit to width
     exportUrl += `&gridlines=false`;         // Sembunyikan gridlines untuk tampilan bersih
     exportUrl += `&printtitle=false`;        // Sembunyikan judul spreadsheet
     exportUrl += `&fzr=false`;               // Frozen rows tidak diulang
     exportUrl += `&pagenum=UNDEFINED`;       // No page numbers
     exportUrl += `&horizontal_alignment=CENTER`; // Center horizontally
     
-    // When range is specified, use ZERO margins for tight crop around content
-    // When no range (full sheet), keep small margins for readability
+    // When range is specified: landscape + no scale + zero margins untuk tampilkan kolom sebanyak mungkin
+    // When no range: portrait A4 with small margins
     if (rangeIndices) {
-      exportUrl += `&top_margin=0`;          // Zero margin for tight crop
+      exportUrl += `&portrait=false`;        // Landscape → lebih lebar untuk banyak kolom (A-R)
+      exportUrl += `&size=A4`;               // Ukuran A4 landscape
+      exportUrl += `&fitw=false`;            // Jangan paksa scale ke lebar halaman
+      exportUrl += `&top_margin=0`;          // Zero margin
       exportUrl += `&bottom_margin=0`;
       exportUrl += `&left_margin=0`;
       exportUrl += `&right_margin=0`;
     } else {
-      exportUrl += `&top_margin=0.5`;        // Small margin for full sheet readability
+      exportUrl += `&portrait=true`;         // Portrait untuk full sheet
+      exportUrl += `&size=A4`;               // Ukuran A4
+      exportUrl += `&fitw=true`;             // Fit to width
+      exportUrl += `&top_margin=0.5`;        // Small margin
       exportUrl += `&bottom_margin=0.5`;
       exportUrl += `&left_margin=0.5`;
       exportUrl += `&right_margin=0.5`;
