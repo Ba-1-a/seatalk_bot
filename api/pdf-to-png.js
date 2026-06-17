@@ -34,6 +34,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
   // Embed pdf.min.js content and worker as blob URL
   // NO padding/margin/background - only pure canvas content
+  // Setelah render, crop tiap canvas ke bounding box konten non-putih
+  // agar container hanya selebar konten yang sebenarnya (hilangkan whitespace)
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -41,7 +43,6 @@ function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{background:#fff;font-family:sans-serif}
-body{font-family:sans-serif}
 #c{display:flex;flex-direction:column;align-items:flex-start;gap:0}
 .pw{display:inline-block;line-height:0}
 .pw canvas{display:block;margin:0;padding:0}
@@ -57,12 +58,10 @@ ${pdfjsCode}
 </script>
 <script>
 (function(){
-  // Setup worker via blob URL
   var wb = new Blob([${JSON.stringify(workerCode)}], {type:'application/javascript'});
   var wu = URL.createObjectURL(wb);
   pdfjsLib.GlobalWorkerOptions.workerSrc = wu;
 
-  // Read PDF from base64 embedded in page
   var b64 = ${JSON.stringify(pdfBase64)};
   var bytes = Uint8Array.from(atob(b64), function(c){return c.charCodeAt(0)});
 
@@ -72,20 +71,59 @@ ${pdfjsCode}
     for(var i=1;i<=pdf.numPages;i++){
       s.textContent='Page '+i+'/'+pdf.numPages+'...';
       var page=await pdf.getPage(i);
-      // Use higher scale (3x) for better quality
       var vp=page.getViewport({scale:3});
-      var w=document.createElement('div');
-      w.className='pw';
+      var pw=document.createElement('div');
+      pw.className='pw';
       var cv=document.createElement('canvas');
-      // Set explicit size on canvas
       cv.width=vp.width; cv.height=vp.height;
       cv.style.width=vp.width+'px'; cv.style.height=vp.height+'px';
-      w.appendChild(cv); c.appendChild(w);
+      pw.appendChild(cv); c.appendChild(pw);
       var ctx=cv.getContext('2d');
       ctx.fillStyle='#FFFFFF';
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
+    // === CROP EACH CANVAS TO CONTENT BOUNDING BOX ===
+    // Scan pixels, find tight bounding box of non-white content,
+    // then resize canvas to just that area
+    var canvases = c.querySelectorAll('canvas');
+    var totalH = 0;
+    canvases.forEach(function(cv){
+      var ctx = cv.getContext('2d');
+      var w = cv.width, h = cv.height;
+      var imageData = ctx.getImageData(0,0,w,h);
+      var data = imageData.data;
+      var minX = w, minY = h, maxX = 0, maxY = 0;
+      var found = false;
+      // Sample every 3rd pixel for speed
+      for(var y=0;y<h;y+=3){
+        for(var x=0;x<w;x+=3){
+          var idx = (y*w+x)*4;
+          var r=data[idx], g=data[idx+1], b=data[idx+2];
+          // Non-white if any channel > 30 away from 255
+          if(Math.abs(r-255)>30||Math.abs(g-255)>30||Math.abs(b-255)>30){
+            if(x<minX)minX=x; if(y<minY)minY=y;
+            if(x>maxX)maxX=x; if(y>maxY)maxY=y;
+            found = true;
+          }
+        }
+      }
+      if(!found) return; // canvas kosong, skip
+      // Add 3px padding
+      minX=Math.max(0,minX-3); minY=Math.max(0,minY-3);
+      maxX=Math.min(w-1,maxX+3); maxY=Math.min(h-1,maxY+3);
+      var newW = maxX-minX+1, newH = maxY-minY+1;
+      // Draw cropped region into a temp canvas, then replace
+      var tmp = document.createElement('canvas');
+      tmp.width=newW; tmp.height=newH;
+      var tmpCtx = tmp.getContext('2d');
+      tmpCtx.drawImage(cv, minX,minY, newW,newH, 0,0, newW,newH);
+      cv.width = newW; cv.height = newH;
+      cv.style.width = newW+'px'; cv.style.height = newH+'px';
+      ctx.drawImage(tmp,0,0);
+      // Update parent wrapper width
+      if(cv.parentElement) cv.parentElement.style.width = newW+'px';
+    });
     s.textContent='Selesai';
     URL.revokeObjectURL(wu);
     document.body.dataset.ready='true';
