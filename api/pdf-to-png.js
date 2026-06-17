@@ -84,8 +84,9 @@ ${pdfjsCode}
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
     // === CROP EACH CANVAS TO CONTENT BOUNDING BOX ===
-    // Scan pixels, find tight bounding box of non-white content,
-    // then resize canvas to just that area
+    // 1. Scan pixels, find tight bounding box of non-white content
+    // 2. Then aggressively trim right edge whitespace (columns with >99% white)
+    // This removes the leftover whitespace on the right side
     var canvases = c.querySelectorAll('canvas');
     var totalH = 0;
     canvases.forEach(function(cv){
@@ -121,8 +122,42 @@ ${pdfjsCode}
       cv.width = newW; cv.height = newH;
       cv.style.width = newW+'px'; cv.style.height = newH+'px';
       ctx.drawImage(tmp,0,0);
+      
+      // === AGGRESSIVE RIGHT-EDGE TRIM ===
+      // Scan columns from right to left, trim any column that's >99% white
+      // This specifically removes the leftover whitespace on the right side
+      w = cv.width; h = cv.height;
+      imageData = ctx.getImageData(0,0,w,h);
+      data = imageData.data;
+      var trimRight = 0;
+      for(var x=w-1;x>=0;x--){
+        var nonWhite = 0, total = 0;
+        for(var y=0;y<h;y+=2){
+          var idx = (y*w+x)*4;
+          var r=data[idx], g=data[idx+1], b=data[idx+2];
+          total++;
+          // Count non-white pixels (threshold > 20 from 255)
+          if(Math.abs(r-255)>20||Math.abs(g-255)>20||Math.abs(b-255)>20){
+            nonWhite++;
+          }
+        }
+        // If this column has >1% non-white pixels, stop trimming
+        if(total > 0 && nonWhite / total > 0.01) break;
+        trimRight++;
+      }
+      // Only trim if there's significant whitespace on the right (>5px)
+      if(trimRight > 5){
+        newW = w - trimRight;
+        tmp = document.createElement('canvas');
+        tmp.width=newW; tmp.height=h;
+        tmpCtx = tmp.getContext('2d');
+        tmpCtx.drawImage(cv, 0,0, newW,h, 0,0, newW,h);
+        cv.width = newW; cv.height = h;
+        cv.style.width = newW+'px'; cv.style.height = h+'px';
+        ctx.drawImage(tmp,0,0);
+      }
       // Update parent wrapper width
-      if(cv.parentElement) cv.parentElement.style.width = newW+'px';
+      if(cv.parentElement) cv.parentElement.style.width = cv.width+'px';
     });
     s.textContent='Selesai';
     URL.revokeObjectURL(wu);
