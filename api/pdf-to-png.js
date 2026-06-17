@@ -161,127 +161,41 @@ export default async function handler(req, res) {
     }
     await new Promise(r => setTimeout(r, 3000));
 
-    // Screenshot - smart crop to actual visible content (eliminate ALL whitespace)
-    // Scans canvas pixels to find the tightest bounding box around non-white content
-    // This eliminates PDF page margins and padding even within the rendered canvas
-    const clipRect = await page.evaluate(() => {
-      const canvases = document.querySelectorAll('#c canvas');
-      if (canvases.length === 0) return null;
-      
-      // Find the tight bounding box across ALL canvases by scanning pixels
-      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-      
-      canvases.forEach(function(canvas) {
-        var ctx = canvas.getContext('2d');
-        var w = canvas.width;
-        var h = canvas.height;
-        var imageData = ctx.getImageData(0, 0, w, h);
-        var data = imageData.data;
-        var stride = 4; // RGBA
-        
-        // We sample every 4th pixel for performance (check pixels at 4px intervals)
-        // Also check edge pixels more thoroughly
-        var step = 4;
-        
-        // Scan horizontally for first non-white pixel (top)
-        var foundTop = false;
-        for (var y = 0; y < h; y += step) {
-          for (var x = 0; x < w; x += step) {
-            var idx = (y * w + x) * stride;
-            var r = data[idx], g = data[idx+1], b = data[idx+2];
-            // Consider pixel non-white if any channel differs from white by >30
-            if (Math.abs(r - 255) > 30 || Math.abs(g - 255) > 30 || Math.abs(b - 255) > 30) {
-              if (y < minY) minY = y;
-              foundTop = true;
-              break;
-            }
-          }
-          if (foundTop) break;
-        }
-        
-        // Scan from bottom
-        var foundBottom = false;
-        for (var y = h - 1; y >= 0; y -= step) {
-          for (var x = 0; x < w; x += step) {
-            var idx = (y * w + x) * stride;
-            var r = data[idx], g = data[idx+1], b = data[idx+2];
-            if (Math.abs(r - 255) > 30 || Math.abs(g - 255) > 30 || Math.abs(b - 255) > 30) {
-              if (y > maxY) maxY = y;
-              foundBottom = true;
-              break;
-            }
-          }
-          if (foundBottom) break;
-        }
-        
-        // Scan from left
-        var foundLeft = false;
-        for (var x = 0; x < w; x += step) {
-          for (var y = 0; y < h; y += step) {
-            var idx = (y * w + x) * stride;
-            var r = data[idx], g = data[idx+1], b = data[idx+2];
-            if (Math.abs(r - 255) > 30 || Math.abs(g - 255) > 30 || Math.abs(b - 255) > 30) {
-              if (x < minX) minX = x;
-              foundLeft = true;
-              break;
-            }
-          }
-          if (foundLeft) break;
-        }
-        
-        // Scan from right
-        var foundRight = false;
-        for (var x = w - 1; x >= 0; x -= step) {
-          for (var y = 0; y < h; y += step) {
-            var idx = (y * w + x) * stride;
-            var r = data[idx], g = data[idx+1], b = data[idx+2];
-            if (Math.abs(r - 255) > 30 || Math.abs(g - 255) > 30 || Math.abs(b - 255) > 30) {
-              if (x > maxX) maxX = x;
-              foundRight = true;
-              break;
-            }
-          }
-          if (foundRight) break;
-        }
-      });
-      
-      // Add 2px padding around content for safety (avoid clipping borders)
-      var pad = 2;
-      if (minX !== Infinity && minY !== Infinity && maxX !== -Infinity && maxY !== -Infinity) {
-        // Get canvas rendered position on screen (for clipping in screenshot coords)
-        var container = document.getElementById('c');
-        var rect = container.getBoundingClientRect();
-        
-        // Account for devicePixelRatio in the rendering
-        // The canvas is rendered at 3x scale (from pdfjs), but displayed at 1x CSS pixels
-        // We need to map canvas pixel coords to CSS/screenshot pixel coords
-        var firstCanvas = canvases[0];
-        var cssWidth = firstCanvas.style.width ? parseInt(firstCanvas.style.width) : firstCanvas.width;
-        var scaleX = cssWidth / firstCanvas.width;
-        var scaleY = cssWidth / firstCanvas.width; // square
-        
-        return {
-          x: Math.round(rect.x + minX * scaleX - pad),
-          y: Math.round(rect.y + minY * scaleY - pad),
-          width: Math.round((maxX - minX) * scaleX + pad * 2),
-          height: Math.round((maxY - minY) * scaleY + pad * 2)
-        };
-      }
-      return null;
+    // Screenshot strategy:
+    // 1. Get the exact bounding box of the container that holds all canvases
+    // 2. Resize viewport to exactly match that size (no overflow, no clipping)
+    // 3. Take a clean fullPage screenshot at 1:1 CSS pixel mapping
+    // This avoids coordinate mapping issues between canvas pixels and screenshot pixels
+    const contentSize = await page.evaluate(() => {
+      const container = document.getElementById('c');
+      if (!container) return null;
+      const rect = container.getBoundingClientRect();
+      // Clean up the loading text node
+      document.getElementById('s').style.display = 'none';
+      return {
+        width: Math.ceil(rect.width),
+        height: Math.ceil(rect.height)
+      };
     });
 
-    let png;
-    if (clipRect && clipRect.width > 0 && clipRect.height > 0) {
-      console.log(`Clipping to canvas area: ${JSON.stringify(clipRect)}`);
-      png = await page.screenshot({
-        type: 'png',
-        omitBackground: false,
-        clip: clipRect
+    console.log(`Content size: ${JSON.stringify(contentSize)}`);
+
+    // Resize viewport to exact content size for clean capture
+    if (contentSize && contentSize.width > 0 && contentSize.height > 0) {
+      await page.setViewport({
+        width: contentSize.width,
+        height: contentSize.height,
+        deviceScaleFactor: 2
       });
-    } else {
-      // Fallback: full page screenshot
-      png = await page.screenshot({ type: 'png', fullPage: true, omitBackground: false });
+      // Small delay for viewport resize to take effect
+      await new Promise(r => setTimeout(r, 500));
     }
+
+    const png = await page.screenshot({
+      type: 'png',
+      fullPage: true,
+      omitBackground: false
+    });
     console.log(`PNG: ${png.length}B`);
 
     return res.status(200)
