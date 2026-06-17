@@ -283,9 +283,9 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     // When range is specified: landscape + no scale + zero margins untuk tampilkan kolom sebanyak mungkin
     // When no range: portrait A4 with small margins
     if (rangeIndices) {
-      exportUrl += `&portrait=false`;        // Landscape → lebih lebar untuk banyak kolom (A-R)
+      exportUrl += `&portrait=false`;        // Landscape → 297mm width (vs 210mm portrait) → cukup untuk A-R
       exportUrl += `&size=A4`;               // Ukuran A4 landscape
-      exportUrl += `&fitw=false`;            // Jangan paksa scale ke lebar halaman
+      exportUrl += `&fitw=true`;             // Scale to fit landscape width → SEMUA kolom masuk
       exportUrl += `&top_margin=0`;          // Zero margin
       exportUrl += `&bottom_margin=0`;
       exportUrl += `&left_margin=0`;
