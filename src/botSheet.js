@@ -278,7 +278,6 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&printtitle=false`;        // Sembunyikan judul spreadsheet
     exportUrl += `&fzr=false`;               // Frozen rows tidak diulang
     exportUrl += `&pagenum=false`;            // No page numbers
-    exportUrl += `&horizontal_alignment=CENTER`; // Center horizontally
     
     // When range is specified: TABLOID (17"x11") landscape
     // TABLOID = 432x279mm = 17x11 inch — ukuran standar terbesar Google Drive
@@ -286,8 +285,6 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     // Parameter yang VALID untuk Google Drive PDF export:
     //   portrait, size, fitw, fith, gridlines, printtitle, pagenum, fzr, 
     //   top_margin, bottom_margin, left_margin, right_margin, gid, r1,c1,r2,c2
-    //   CATATAN: "scale" BUKAN parameter yang valid!
-    //            "horizontal_alignment" BUKAN parameter yang valid!
     if (rangeIndices) {
       exportUrl += `&portrait=false`;        // Landscape → 432mm lebar
       exportUrl += `&size=TABLOID`;          // 17"x11" (432x279mm)

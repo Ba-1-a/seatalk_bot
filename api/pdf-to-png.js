@@ -95,13 +95,13 @@ ${pdfjsCode}
       var data = imageData.data;
       var minX = w, minY = h, maxX = 0, maxY = 0;
       var found = false;
-      // Sample every 3rd pixel for speed
-      for(var y=0;y<h;y+=3){
-        for(var x=0;x<w;x+=3){
+      // Sample every 2nd pixel — more precise for thin borders
+      for(var y=0;y<h;y+=2){
+        for(var x=0;x<w;x+=2){
           var idx = (y*w+x)*4;
           var r=data[idx], g=data[idx+1], b=data[idx+2];
-          // Non-white if any channel > 30 away from 255
-          if(Math.abs(r-255)>30||Math.abs(g-255)>30||Math.abs(b-255)>30){
+          // Non-white if any channel > 20 away from 255 (catch light grey borders)
+          if(Math.abs(r-255)>20||Math.abs(g-255)>20||Math.abs(b-255)>20){
             if(x<minX)minX=x; if(y<minY)minY=y;
             if(x>maxX)maxX=x; if(y>maxY)maxY=y;
             found = true;
