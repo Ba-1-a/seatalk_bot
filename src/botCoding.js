@@ -70,7 +70,7 @@ function detectScreenshotIntent(text) {
  * @param {String} threadId - ID thread
  * @param {String} originalMessageId - ID pesan original
  */
-export async function handleGeneralChat(env, targetId, text, isGroup, threadId, originalMessageId) {
+export async function handleGeneralChat(env, targetId, text, isGroup, threadId, originalMessageId, ctx = null) {
   try {
     // ================================================================
     // INTENT DETECTION: Deteksi natural language command
@@ -88,12 +88,22 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
         // Format ulang argumen: ambil kata selain kata kunci screenshot
         const cleanedText = text.replace(/^(bisa|tolong|minta|buatkan|ambilkan|coba|kak|bang)?\s*(screenshot|ss|screen.?shot|capture|print.?screen|foto.?sheet|gambar.?sheet|gambar)\s*/i, '/screenshot ').trim();
         
-        // Jika hasil pembersihan cuma "/screenshot" tanpa argumen tambahan, 
-        // kita gunakan sheet default langsung
-        if (cleanedText === '/screenshot' || cleanedText === '/screenshot ') {
-          await handleScreenshotCommand(env, targetId, `/screenshot ${defaultSheetId}`, isGroup, threadId, originalMessageId);
+        // Gunakan ctx.waitUntil untuk screenshot (proses lambat, cegah timeout)
+        const screenshotText = cleanedText === '/screenshot' || cleanedText === '/screenshot '
+          ? `/screenshot ${defaultSheetId}`
+          : cleanedText;
+        
+        if (ctx && typeof ctx.waitUntil === 'function') {
+          ctx.waitUntil((async () => {
+            try {
+              await handleScreenshotCommand(env, targetId, screenshotText, isGroup, threadId, originalMessageId);
+            } catch (err) {
+              log.error('Background: screenshot intent failed', err);
+            }
+          })());
         } else {
-          await handleScreenshotCommand(env, targetId, cleanedText, isGroup, threadId, originalMessageId);
+          // Fallback: synchronous (tanpa ctx, misal dari Vercel atau test)
+          await handleScreenshotCommand(env, targetId, screenshotText, isGroup, threadId, originalMessageId);
         }
         return;
       } else {

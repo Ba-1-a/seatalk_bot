@@ -13,10 +13,17 @@
  * 2. Kirim PDF ke Vercel endpoint /api/pdf-to-png untuk di-convert ke PNG
  * 3. Kirim PNG ke SeaTalk via base64
  * 
+ * PERBAIKAN KELEMAHAN:
+ * - ctx.waitUntil(): Respon 200 segera, proses screenshot di background (cegah retry duplikasi)
+ * - Deduplikasi message_id: Cegah pemrosesan ulang saat SeaTalk retry
+ * - Custom range export via parameter r1,c1,r2,c2 (bukan full sheet)
+ * 
  * Fitur:
  * - Webhook callback untuk SeaTalk dengan seatalk_challenge handler
  * - Routing command ke handler masing-masing
  * - Cron job scheduler untuk laporan otomatis
+ * - Background processing via ctx.waitUntil untuk operasi lambat
+ * - Deduplication via message_id untuk cegah retry duplikasi
  */
 
 import { handleGeneralChat } from './src/botCoding.js';
@@ -25,6 +32,32 @@ import { getHourlyReportData, handleInventoryQuery, handleSetSheet, handleReadSh
 import { createLogger, SERVICES, getLogFileInfo } from './src/logger.js';
 
 const log = createLogger(SERVICES.CORE);
+
+// ============================================================
+// DEDUPLICATION CACHE
+// ============================================================
+
+/**
+ * Cek apakah message_id sudah diproses (cegah duplikasi retry SeaTalk)
+ * SeaTalk punya retry mechanism: jika tidak dapat 200 dalam ~5 detik, retry 5x
+ * Karena screenshot butuh 30+ detik, kita pakai ctx.waitUntil() + dedup
+ * 
+ * @param {Object} env - Environment variables
+ * @param {String} messageId - SeaTalk message_id
+ * @returns {Boolean} true jika sudah diproses (skip), false jika belum
+ */
+async function isDuplicateMessage(env, messageId) {
+  if (!messageId) return false;
+  const dedupKey = `dedup_msg_${messageId}`;
+  const existing = await env.BOT_MEMORY.get(dedupKey);
+  if (existing) {
+    log.info('Duplicate message detected via dedup key, skipping', { messageId });
+    return true;
+  }
+  // Tahan selama 120 detik (cukup untuk proses screenshot)
+  await env.BOT_MEMORY.put(dedupKey, '1', { expirationTtl: 120 });
+  return false;
+}
 
 export default {
   // 1. GERBANG MASUK CHAT (WEBHOOK SEATALK)
@@ -57,29 +90,93 @@ export default {
       const incomingText = extractIncomingText(message);
       if (!incomingText) return new Response("OK", { status: 200 });
 
-      reqLog.info('Incoming message', { senderId, groupId, isGroup, messageId, text: incomingText.substring(0, 80) });
-
-      // Routing Command
-      if (incomingText.startsWith("/inventory")) {
-        reqLog.info('Routing → /inventory');
-        await handleInventoryQuery(env, targetId, incomingText, isGroup, threadId, messageId);
-      } else if (incomingText.startsWith("/setsheet")) {
-        reqLog.info('Routing → /setsheet');
-        await handleSetSheet(env, targetId, incomingText, isGroup, threadId, messageId);
-      } else if (incomingText.startsWith("/readsheet")) {
-        reqLog.info('Routing → /readsheet');
-        await handleReadSheet(env, targetId, incomingText, isGroup, threadId, messageId);
-      } else if (incomingText.startsWith("/screenshot")) {
-        reqLog.info('Routing → /screenshot');
-        // ALUR: Export PDF (Google Drive API) -> Vercel PDF-to-PNG -> Kirim PNG ke SeaTalk
-        await handleScreenshotCommand(env, targetId, incomingText, isGroup, threadId, messageId);
-      } else {
-        reqLog.info('Routing → /general-chat (AI)');
-        await handleGeneralChat(env, targetId, incomingText, isGroup, threadId, messageId);
+      // Cek deduplikasi: jika message_id sudah diproses, skip
+      if (messageId) {
+        const isDup = await isDuplicateMessage(env, messageId);
+        if (isDup) {
+          return new Response("OK", { status: 200 }); // Acknowledge tapi skip proses
+        }
       }
 
-      reqLog.info('Request completed');
-      return new Response("OK", { status: 200 });
+      reqLog.info('Incoming message', { senderId, groupId, isGroup, messageId, text: incomingText.substring(0, 80) });
+
+      // ================================================================
+      // STRATEGI ctx.waitUntil() UNTUK CEGAH DUPLIKASI RETRY SEATALK
+      // ================================================================
+      // SeaTalk punya retry mechanism: jika worker tidak merespon 200
+      // dalam ~5 detik, SeaTalk akan kirim ulang event (hingga 5x).
+      // Screenshot membutuhkan waktu 15-60 detik (export PDF + Vercel convert).
+      // 
+      // Solusi: Untuk command yang lambat (screenshot), kita:
+      // 1. Kirim response 200 segera ("OK")
+      // 2. Proses di background via ctx.waitUntil()
+      // 3. CEGAH DUPLIKASI via dedup key (message_id)
+      //
+      // Command cepat (text reply) tetap diproses synchronous.
+
+      const isSlowCommand = incomingText.startsWith("/screenshot");
+
+      if (isSlowCommand) {
+        // ================================================================
+        // SLOW COMMAND: Background processing via ctx.waitUntil()
+        // ================================================================
+        // Response 200 segera, proses screenshot di background
+        // Ini mencegah SeaTalk timeout dan retry duplikasi
+        
+        // Kirim response 200 segera
+        const response = new Response("OK", { status: 200 });
+        
+        // Proses screenshot di background
+        ctx.waitUntil((async () => {
+          try {
+            reqLog.info('Background: Starting screenshot processing');
+            
+            // Eksekusi screenshot (processing message dikirim oleh handleScreenshotCommand)
+            await handleScreenshotCommand(env, targetId, incomingText, isGroup, threadId, messageId);
+            
+            reqLog.info('Background: Screenshot processing completed');
+          } catch (err) {
+            reqLog.error('Background: Screenshot processing failed', err);
+          }
+        })());
+        
+        return response;
+      } else {
+        // ================================================================
+        // FAST COMMAND: Synchronous processing
+        // ================================================================
+        // Command yang cepat (text reply) diproses langsung
+        
+        if (incomingText.startsWith("/inventory")) {
+          reqLog.info('Routing → /inventory');
+          await handleInventoryQuery(env, targetId, incomingText, isGroup, threadId, messageId);
+        } else if (incomingText.startsWith("/setsheet")) {
+          reqLog.info('Routing → /setsheet');
+          await handleSetSheet(env, targetId, incomingText, isGroup, threadId, messageId);
+        } else if (incomingText.startsWith("/readsheet")) {
+          reqLog.info('Routing → /readsheet');
+          await handleReadSheet(env, targetId, incomingText, isGroup, threadId, messageId);
+        } else if (incomingText.startsWith("/screenshot")) {
+          // Fallback: jika ada screenshot tapi tidak lewat slow path (misal dari intent detection di botCoding)
+          reqLog.info('Routing → /screenshot (fallback)');
+          ctx.waitUntil((async () => {
+            try {
+              await handleScreenshotCommand(env, targetId, incomingText, isGroup, threadId, messageId);
+            } catch (err) {
+              reqLog.error('Background: screenshot fallback failed', err);
+            }
+          })());
+        } else {
+          reqLog.info('Routing → /general-chat (AI)');
+          
+          // AI chat juga bisa lambat (AI response time), 
+          // tapi biasanya <10 detik jadi aman synchronous
+          await handleGeneralChat(env, targetId, incomingText, isGroup, threadId, messageId, ctx);
+        }
+
+        reqLog.info('Request completed');
+        return new Response("OK", { status: 200 });
+      }
     } catch (err) {
       reqLog.error('Worker error', err);
       return new Response("Error", { status: 500 });

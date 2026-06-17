@@ -9,6 +9,12 @@
  * 3. Vercel render PDF native di Chrome (bukan HTML buatan!) -> screenshot PNG
  * 4. Kirim PNG ke SeaTalk via base64 inline
  * 
+ * PERBAIKAN KELEMAHAN:
+ * - Custom range sekarang didukung via parameter r1,c1,r2,c2 di Google Drive export
+ *   Format: "A1:D15" → r1=0,c1=0,r2=15,c2=3
+ * - Fungsi exportSpreadsheetToPdf menerima parameter range opsional
+ * - Fungsi parseA1Notation untuk konversi A1:D15 ke row/col index
+ * 
  * KENAPA INI BENAR:
  * - "Jangan render lewat HTML, tapi benar-benar ambil screenshot"
  * - Google Drive API export PDF GRATIS dan preserve warna, border, merged cells, dll
@@ -18,6 +24,7 @@
  * FITUR:
  * - Autentikasi Google Service Account (JWT)
  * - Export spreadsheet ke PDF via Google Drive API (GRATIS)
+ * - SUPPORT CUSTOM RANGE: A1:D15 via parameter Google Drive export
  * - Convert PDF ke PNG via Vercel Puppeteer (render native Chrome)
  * - Kirim screenshot ke SeaTalk
  * - Baca data spreadsheet untuk AI (text mode)
@@ -155,6 +162,58 @@ function parseCustomRange(rangeStr) {
 }
 
 /**
+ * Parse A1 notation range menjadi row/col indices untuk Google Drive export
+ * 
+ * Google Drive export mendukung parameter range via:
+ *   r1 = start row index (0-based, inclusive)
+ *   r2 = end row index (0-based, exclusive - setara nomor baris terakhir)
+ *   c1 = start column index (0-based, inclusive)
+ *   c2 = end column index (0-based, exclusive)
+ * 
+ * Contoh: "A1:D15" → { r1:0, c1:0, r2:15, c2:4 } karena D=3 -> +1 exclusive = 4
+ *          "C5:F20"  → { r1:4, c1:2, r2:20, c2:6 }
+ * 
+ * @param {String} range - A1 notation range (e.g. "A1:D15", "C5:F20")
+ * @returns {Object|null} { r1, c1, r2, c2 } atau null jika tidak valid
+ */
+function parseA1RangeToIndices(range) {
+    if (!range) return null;
+    
+    // Hapus whitespace dan normalize
+    const cleanRange = normalizeRangeToken(range).toUpperCase().replace(/\s/g, '');
+    
+    // Pattern: A1:D15, C5:F20, A:Z (tanpa baris)
+    const match = cleanRange.match(/^([A-Z]{1,3})(\d*):([A-Z]{1,3})(\d*)$/);
+    if (!match) return null;
+    
+    const [, startColStr, startRowStr, endColStr, endRowStr] = match;
+    
+    // Konversi kolom (A=0, B=1, ..., Z=25, AA=26, ...)
+    const colToIndex = (colStr) => {
+        let index = 0;
+        for (let i = 0; i < colStr.length; i++) {
+            index = index * 26 + (colStr.charCodeAt(i) - 64); // 'A' = 65
+        }
+        return index - 1; // 0-based
+    };
+    
+    const c1 = colToIndex(startColStr);
+    const c2 = colToIndex(endColStr) + 1; // Exclusive
+    
+    // Baris: 1-based di A1 notation, konversi ke 0-based
+    // Jika tidak ada nomor baris, default ke baris pertama/terakhir
+    const startRow = startRowStr ? parseInt(startRowStr, 10) : 1;
+    const endRow = endRowStr ? parseInt(endRowStr, 10) : 1000; // reasonable max
+    
+    const r1 = startRow - 1; // 0-based, inclusive
+    const r2 = endRow;       // 0-based, exclusive (Google Drive API: r2 = last row index + 1)
+    
+    googleLog.info('Parsed A1 range', { range, r1, c1, r2, c2, startColStr, endColStr, startRow, endRow });
+    
+    return { r1, c1, r2, c2 };
+}
+
+/**
  * Baca data spreadsheet secara diam-diam untuk konteks AI
  * (Text mode - BUKAN untuk screenshot)
  */
@@ -191,6 +250,14 @@ export async function silentReadSheetForAI(env, spreadsheetId, tabName = "") {
  * Export spreadsheet ke PDF via Google Drive API
  * ALUR: Spreadsheet ID -> Google Drive API export -> PDF buffer
  * 
+ * PERBAIKAN: Sekarang mendukung custom range via parameter Google Drive export!
+ * Parameter yang digunakan:
+ *   r1, c1 = start row/col index (0-based, inclusive)
+ *   r2, c2 = end row/col index (0-based, exclusive)
+ * 
+ * Tanpa range: export seluruh sheet
+ * Dengan range: export hanya area yang ditentukan
+ * 
  * Google Drive API export GRATIS dan mempertahankan formatting asli
  * (warna, border, merged cells, font, dll) karena export dilakukan
  * oleh server Google langsung.
@@ -198,9 +265,10 @@ export async function silentReadSheetForAI(env, spreadsheetId, tabName = "") {
  * @param {Object} env - Environment variables
  * @param {String} spreadsheetId - ID spreadsheet
  * @param {String} sheetGid - Grid ID sheet target (optional, untuk export sheet tertentu)
+ * @param {Object|null} rangeIndices - { r1, c1, r2, c2 } untuk custom range (optional)
  * @returns {ArrayBuffer} PDF buffer
  */
-async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null) {
+async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, rangeIndices = null) {
     const token = await getGoogleToken(env);
     
     // Build export URL dengan parameter
@@ -222,7 +290,32 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null) {
         exportUrl += `&gid=${sheetGid}`;
     }
     
-    googleLog.info('Exporting spreadsheet to PDF', { spreadsheetId, exportUrl: exportUrl.substring(0, 100) });
+    // ================================================================
+    // PERBAIKAN: Custom range support via parameter r1,c1,r2,c2
+    // ================================================================
+    // Google Drive API export mendukung parameter range:
+    //   r1 = start row index (0-based, inclusive)
+    //   r2 = end row index (0-based, exclusive)
+    //   c1 = start column index (0-based, inclusive)  
+    //   c2 = end column index (0-based, exclusive)
+    //
+    // Contoh: range "A1:D15" → r1=0, c1=0, r2=15, c2=4
+    //          range "C5:F20" → r1=4, c1=2, r2=20, c2=6
+    //
+    // Tanpa parameter ini: export FULL SHEET (seluruh halaman)
+    // Dengan parameter: export HANYA area yang ditentukan
+    // ================================================================
+    if (rangeIndices) {
+        exportUrl += `&r1=${rangeIndices.r1}`;
+        exportUrl += `&c1=${rangeIndices.c1}`;
+        exportUrl += `&r2=${rangeIndices.r2}`;
+        exportUrl += `&c2=${rangeIndices.c2}`;
+        googleLog.info('Custom range applied to PDF export', rangeIndices);
+    } else {
+        googleLog.info('No custom range - exporting entire sheet');
+    }
+    
+    googleLog.info('Exporting spreadsheet to PDF', { spreadsheetId, exportUrl: exportUrl.substring(0, 150) });
     
     const response = await fetch(exportUrl, {
         method: "GET",
@@ -251,7 +344,9 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null) {
     
     googleLog.info('PDF exported successfully', { 
         spreadsheetId, 
-        sizeBytes: pdfBuffer.byteLength 
+        sizeBytes: pdfBuffer.byteLength,
+        hasRange: !!rangeIndices,
+        range: rangeIndices
     });
     
     if (pdfBuffer.byteLength < 200) {
@@ -352,16 +447,31 @@ async function convertPdfToPng(pdfBuffer, env) {
  * 2. Kirim PDF ke Vercel untuk di-render native Chrome -> screenshot PNG
  * 3. Kirim PNG ke SeaTalk
  * 
+ * PERBAIKAN:
+ * - Custom range sekarang diproses dan dikirim ke Google Drive API
+ * - parseA1RangeToIndices mengkonversi "A1:D15" ke parameter r1,c1,r2,c2
+ * 
  * @param {Object} env - Environment variables
  * @param {String} spreadsheetId - ID spreadsheet
  * @param {String} tabName - Nama tab (optional)
- * @param {String} customRange - Custom range (optional - hanya untuk info, PDF tetap full sheet)
+ * @param {String} customRange - Custom range A1 notation (e.g. "A1:D15", optional)
  * @returns {ArrayBuffer} PNG image buffer
  */
 export async function generateSheetPng(env, spreadsheetId, tabName = "", customRange = null) {
     googleLog.info('generateSheetPng: Starting', { spreadsheetId, tabName, customRange });
     
-    // STEP 1: Dapatkan daftar sheets dan cari GID target jika tabName diberikan
+    // STEP 1: Parse custom range ke indices untuk Google Drive export
+    let rangeIndices = null;
+    if (customRange) {
+        rangeIndices = parseA1RangeToIndices(customRange);
+        if (rangeIndices) {
+            googleLog.info('Custom range parsed', { customRange, rangeIndices });
+        } else {
+            googleLog.warn('Custom range could not be parsed, exporting full sheet', { customRange });
+        }
+    }
+    
+    // STEP 2: Dapatkan daftar sheets dan cari GID target jika tabName diberikan
     let sheetGid = null;
     const sheetsList = await getSheetsList(env, spreadsheetId);
     
@@ -375,11 +485,12 @@ export async function generateSheetPng(env, spreadsheetId, tabName = "", customR
         }
     }
     
-    // STEP 2: Export spreadsheet ke PDF via Google Drive API (GRATIS!)
-    const pdfBuffer = await exportSpreadsheetToPdf(env, spreadsheetId, sheetGid);
-    googleLog.info('PDF exported', { sizeBytes: pdfBuffer.byteLength });
+    // STEP 3: Export spreadsheet ke PDF via Google Drive API (GRATIS!)
+    // Dengan custom range jika ada
+    const pdfBuffer = await exportSpreadsheetToPdf(env, spreadsheetId, sheetGid, rangeIndices);
+    googleLog.info('PDF exported', { sizeBytes: pdfBuffer.byteLength, hasRange: !!rangeIndices });
     
-    // STEP 3: Kirim PDF ke Vercel untuk di-convert ke PNG
+    // STEP 4: Kirim PDF ke Vercel untuk di-convert ke PNG
     // Vercel akan render PDF native di Chrome, bukan HTML buatan!
     const pngBuffer = await convertPdfToPng(pdfBuffer, env);
     vercelLog.info('PNG from Vercel', { sizeBytes: pngBuffer.byteLength });
@@ -483,12 +594,20 @@ function parseScreenshotArguments(tokens) {
  * Handler untuk command /screenshot
  * ALUR YANG BENAR (TANPA HTML, TANPA FREEMIUM):
  * 1. Export spreadsheet ke PDF via Google Drive API (GRATIS!)
- * 2. Kirim PDF ke Vercel untuk di-render native Chrome -> screenshot PNG
- * 3. Kirim PNG ke SeaTalk
+ * 2. Custom range (A1:D15) diteruskan ke Google Drive API via r1,c1,r2,c2
+ * 3. Kirim PDF ke Vercel untuk di-render native Chrome -> screenshot PNG
+ * 4. Kirim PNG ke SeaTalk
+ * 
+ * PERBAIKAN:
+ * - "Pesan processing" sudah dikirim oleh index.js via ctx.waitUntil
+ * - Custom range diproses dan diteruskan ke Google Drive API export
  */
 export async function handleScreenshotCommand(env, targetId, text, isGroup, threadId, originalMessageId) {
     const args = text.replace(/^\S+\s*/, "").trim();
     const tokens = args.split(/\s+/).filter(Boolean);
+    
+    // Kirim pesan "processing" (akan di-skip index.js via dedup jika sudah terkirim)
+    await replyToUser(env, "⏳ Sedang memproses screenshot...", targetId, isGroup, threadId, originalMessageId).catch(() => {});
     
     // Cari sheet ID dari URL atau dari memory
     const explicitSheetId = extractSpreadsheetId(args) || (tokens[0] && extractSpreadsheetId(tokens[0]));
@@ -505,9 +624,6 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
     
     googleLog.info('Screenshot command received', { sheetId, tabName, customRange });
     
-    // Kirim pesan "processing"
-    await replyToUser(env, "⏳ Sedang memproses screenshot...", targetId, isGroup, threadId, originalMessageId);
-    
     try {
         // STEP 1: Dapatkan daftar sheets dan cari GID target
         let sheetGid = null;
@@ -523,10 +639,28 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
             }
         }
         
+        // ================================================================
+        // PERBAIKAN: Parse custom range untuk Google Drive export
+        // ================================================================
+        // User input: "A1:D15" → parseCustomRange → "A1:D15"
+        // → parseA1RangeToIndices → { r1:0, c1:0, r2:15, c2:4 }
+        // → exportSpreadsheetToPdf dengan rangeIndices
+        // ================================================================
+        let rangeIndices = null;
+        if (customRange) {
+            rangeIndices = parseA1RangeToIndices(customRange);
+            if (rangeIndices) {
+                googleLog.info('Screenshot: Custom range will be applied', { customRange, rangeIndices });
+            } else {
+                googleLog.warn('Screenshot: Custom range parsing failed, exporting full sheet', { customRange });
+            }
+        }
+        
         // STEP 2: Export spreadsheet ke PDF via Google Drive API (GRATIS!)
+        // Dengan custom range jika ada
         googleLog.info('Screenshot: Exporting spreadsheet to PDF via Google Drive API');
-        const pdfBuffer = await exportSpreadsheetToPdf(env, sheetId, sheetGid);
-        googleLog.info('Screenshot: PDF exported', { sizeBytes: pdfBuffer.byteLength });
+        const pdfBuffer = await exportSpreadsheetToPdf(env, sheetId, sheetGid, rangeIndices);
+        googleLog.info('Screenshot: PDF exported', { sizeBytes: pdfBuffer.byteLength, rangeApplied: !!rangeIndices });
 
         // STEP 3: Kirim PDF ke Vercel untuk di-convert ke PNG
         // Vercel render PDF native di Chrome (BUKAN HTML buatan!)
