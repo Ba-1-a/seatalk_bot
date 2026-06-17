@@ -280,19 +280,24 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&pagenum=false`;            // No page numbers
     exportUrl += `&horizontal_alignment=CENTER`; // Center horizontally
     
-    // When range is specified: TABLOID (17"x11") landscape dengan fitw=true
-    // TABLOID adalah ukuran kertas standar terbesar yang didukung Google Drive export
-    // Landscape 17" lebar + margin 0.2" = 16.8" konten → muat 18+ kolom
+    // When range is specified: TABLOID (17"x11") landscape
+    // TABLOID = 432x279mm = 17x11 inch — ukuran standar terbesar Google Drive
+    // Landscape 17" lebar + fitw=true → scale konten ke lebar kertas
+    // Parameter yang VALID untuk Google Drive PDF export:
+    //   portrait, size, fitw, fith, gridlines, printtitle, pagenum, fzr, 
+    //   top_margin, bottom_margin, left_margin, right_margin, gid, r1,c1,r2,c2
+    //   CATATAN: "scale" BUKAN parameter yang valid!
+    //            "horizontal_alignment" BUKAN parameter yang valid!
     if (rangeIndices) {
-      exportUrl += `&portrait=false`;        // Landscape
-      exportUrl += `&size=TABLOID`;          // 17"x11" (432x279mm) — terbesar yang didukung
-      exportUrl += `&scale=2`;               // 2 = fit width, 3 = fit height, 4 = fit page
-      exportUrl += `&top_margin=0.2`;        // Margin minimal
+      exportUrl += `&portrait=false`;        // Landscape → 432mm lebar
+      exportUrl += `&size=TABLOID`;          // 17"x11" (432x279mm)
+      exportUrl += `&fitw=true`;             // Scale content to fit page width
+      exportUrl += `&top_margin=0.2`;        // Minimal margin
       exportUrl += `&bottom_margin=0.2`;
       exportUrl += `&left_margin=0.2`;
       exportUrl += `&right_margin=0.2`;
       
-      googleLog.info('Range export: TABLOID landscape', rangeIndices);
+      googleLog.info('Range export: TABLOID landscape, fitw=true', rangeIndices);
     } else {
       exportUrl += `&portrait=true`;         // Portrait untuk full sheet
       exportUrl += `&size=A4`;               // Ukuran A4
