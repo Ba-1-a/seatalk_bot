@@ -314,7 +314,6 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
       exportUrl += `&portrait=${isPortrait ? 'true' : 'false'}`;
       exportUrl += `&size=${paperSize}`;
       exportUrl += `&fitw=true`;             // Scale content fit width
-      exportUrl += `&fith=true`;             // Scale content fit height (baru!)
       exportUrl += `&top_margin=0`;          // Zero margin
       exportUrl += `&bottom_margin=0`;
       exportUrl += `&left_margin=0`;

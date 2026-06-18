@@ -8,12 +8,15 @@
  * - Kirim PDF (base64) ke endpoint ini
  * - Vercel render PDF menggunakan pdfjs-dist via page.setContent()
  * 
- * PERBAIKAN WHITESPACE (v2):
- * - Setelah screenshot, crop tiap canvas ke bounding box konten non-putih
- * - Tambah bottom-edge trim (seperti right-edge trim yg sudah ada)
- * - Scan setiap pixel (bukan setiap 2px) untuk presisi maksimal
- * - Threshold turunkan ke 12 agar gridline abu-abu dianggap putih
- * - Global composite bounding box untuk menyatukan semua page
+ * CROPPING:
+ * - Primary: sharp.trim() — server-side, C++ native, <100ms, pixel-perfect
+ * - Fallback: jika sharp gagal, kirim PNG apa adanya (uncropped)
+ * - Tidak ada browser-side JS cropping (rentan bug)
+ * 
+ * PERBAIKAN:
+ * - Hapus semua JS cropping logic di browser (sumber bug kotak putih)
+ * - Sharp.trim() di keempat sisi dengan threshold 10
+ * - Fallback uncropped kalau sharp error (bot tetap hidup)
  * 
  * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
@@ -21,6 +24,7 @@
 
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
+import sharp from 'sharp';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -31,6 +35,10 @@ export const config = {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Build HTML viewer untuk render PDF dengan pdfjs-dist
+ * Sederhana — tanpa cropping logic. Cropping dilakukan oleh sharp di server-side
+ */
 function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
   return `<!DOCTYPE html>
 <html>
@@ -38,7 +46,7 @@ function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
 <meta charset="utf-8">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{background:#fff;font-family:sans-serif}
+html,body{background:#fff;font-family:sans-serif;display:flex;align-items:flex-start;justify-content:flex-start}
 #c{display:flex;flex-direction:column;align-items:flex-start;gap:0}
 .pw{display:inline-block;line-height:0}
 .pw canvas{display:block;margin:0;padding:0}
@@ -49,7 +57,6 @@ html,body{background:#fff;font-family:sans-serif}
 <div id="s">Loading PDF...</div>
 <div id="c"></div>
 <script>
-// pdfjs-dist v3 UMD bundle inline
 ${pdfjsCode}
 </script>
 <script>
@@ -79,93 +86,6 @@ ${pdfjsCode}
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
-    // === CROP WHITESPACE (ALL 4 SIDES) PER CANVAS ===
-    // 1. Scan every pixel, find tight bounding box of non-white content
-    // 2. Trim right edge: remove columns with >99.5% white
-    // 3. Trim bottom edge: remove rows with >99.5% white
-    // Threshold: 12 from 255 (catches light grey gridlines as white)
-    var canvases = c.querySelectorAll('canvas');
-    var TH = 12; // threshold: pixel is "white" if all channels within TH of 255
-    
-    canvases.forEach(function(cv){
-      var ctx = cv.getContext('2d');
-      var w = cv.width, h = cv.height;
-      var imageData = ctx.getImageData(0,0,w,h);
-      var data = imageData.data;
-      
-      // PHASE 1: Find content bounding box (every pixel)
-      var minX = w, minY = h, maxX = 0, maxY = 0;
-      var found = false;
-      for(var y=0; y<h; y++){
-        for(var x=0; x<w; x++){
-          var idx = (y*w+x)*4;
-          var r=data[idx], g=data[idx+1], b=data[idx+2];
-          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
-            if(x<minX) minX=x; if(y<minY) minY=y;
-            if(x>maxX) maxX=x; if(y>maxY) maxY=y;
-            found = true;
-          }
-        }
-      }
-      if(!found) return; // empty canvas, skip
-      
-      // Add 2px padding
-      minX=Math.max(0,minX-2); minY=Math.max(0,minY-2);
-      maxX=Math.min(w-1,maxX+2); maxY=Math.min(h-1,maxY+2);
-      
-      var newW = maxX-minX+1, newH = maxY-minY+1;
-      
-      // Phase 2: Right-edge aggressive trim
-      // Scan columns from right, remove if >99.9% white
-      var trimRight = 0;
-      for(var x=w-1; x>=0; x--){
-        var nonWhite = 0;
-        for(var y=0; y<h; y++){
-          var idx = (y*w+x)*4;
-          var r=data[idx], g=data[idx+1], b=data[idx+2];
-          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
-            nonWhite++;
-          }
-        }
-        if(nonWhite > 0) break; // stop if ANY non-white pixel in column
-        trimRight++;
-      }
-      
-      // Phase 3: Bottom-edge aggressive trim
-      // Scan rows from bottom, remove if >99.9% white
-      var trimBottom = 0;
-      for(var y=h-1; y>=0; y--){
-        var nonWhite = 0;
-        for(var x=0; x<w; x++){
-          var idx = (y*w+x)*4;
-          var r=data[idx], g=data[idx+1], b=data[idx+2];
-          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
-            nonWhite++;
-          }
-        }
-        if(nonWhite > 0) break;
-        trimBottom++;
-      }
-      
-      // Apply trims
-      if(trimRight > 0 || trimBottom > 0 || minX > 0 || minY > 0){
-        var cropX = minX, cropY = minY;
-        var cropW = newW - trimRight;
-        var cropH = newH - trimBottom;
-        if(cropW < 1) cropW = 1;
-        if(cropH < 1) cropH = 1;
-        
-        var tmp = document.createElement('canvas');
-        tmp.width=cropW; tmp.height=cropH;
-        var tmpCtx = tmp.getContext('2d');
-        tmpCtx.drawImage(cv, cropX,cropY, cropW,cropH, 0,0, cropW,cropH);
-        cv.width = cropW; cv.height = cropH;
-        cv.style.width = cropW+'px'; cv.style.height = cropH+'px';
-        ctx.drawImage(tmp,0,0);
-        if(cv.parentElement) cv.parentElement.style.width = cropW+'px';
-      }
-    });
-    
     s.textContent='Selesai';
     URL.revokeObjectURL(wu);
     document.body.dataset.ready='true';
@@ -245,12 +165,31 @@ export default async function handler(req, res) {
       document.getElementById('s').style.display = 'none';
     });
 
+    // Take screenshot
     var png = await page.screenshot({
       type: 'png',
       fullPage: true,
       omitBackground: false
     });
-    console.log(`PNG: ${png.length}B`);
+    console.log(`Raw PNG: ${png.length}B`);
+
+    // ================================================================
+    // SERVER-SIDE TRIM with SHARP (PRIMARY)
+    // Auto-crop whitespace dari keempat sisi gambar
+    // sharp.trim() — C++ native, <100ms, pixel-perfect
+    // ================================================================
+    try {
+      const trimmedPng = await sharp(png)
+        .trim({ threshold: 10, background: { r: 255, g: 255, b: 255 } })
+        .png()
+        .toBuffer();
+      console.log(`Trimmed PNG: ${trimmedPng.length}B (saved ${png.length - trimmedPng.length}B)`);
+      png = trimmedPng;
+    } catch (sharpErr) {
+      // FALLBACK: jika sharp gagal, kirim raw PNG apa adanya
+      // Bot tetap mengirim gambar walau ada whitespace
+      console.error('Sharp trim failed, sending uncropped PNG:', sharpErr.message);
+    }
 
     return res.status(200)
       .setHeader('Content-Type', 'image/png')
