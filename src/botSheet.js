@@ -279,30 +279,56 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&fzr=false`;               // Frozen rows tidak diulang
     exportUrl += `&pagenum=false`;            // No page numbers
     
-    // When range is specified: TABLOID (17"x11") landscape
-    // TABLOID = 432x279mm = 17x11 inch — ukuran standar terbesar Google Drive
-    // Landscape 17" lebar + fitw=true → scale konten ke lebar kertas
-    // Parameter yang VALID untuk Google Drive PDF export:
-    //   portrait, size, fitw, fith, gridlines, printtitle, pagenum, fzr, 
-    //   top_margin, bottom_margin, left_margin, right_margin, gid, r1,c1,r2,c2
+    // ================================================================
+    // PERBAIKAN: Adaptive paper size berdasarkan range + margin 0
+    // ================================================================
+    // Masalah: Range kecil (A1:B5) di halaman TABLOID(17"x11") menghasilkan
+    // banyak whitespace di kanan dan bawah karena kertas terlalu besar.
+    // 
+    // Solusi: Pilih ukuran kertas sesuai jumlah kolom pada range:
+    //   - 1-3 kolom  → LETTER (8.5"x11") — pas untuk range sempit
+    //   - 4-7 kolom  → TABLOID (17"x11") — cukup untuk range medium
+    //   - 8+ kolom   → TABLOID — lebar maksimal
+    // 
+    // Fitur tambahan:
+    //   - fitw=true + fith=true → konten di-shrink pas di kedua sumbu
+    //   - margin=0 → benar-benar tanpa margin
+    //   - gridlines=false → tidak ada garis grid sebagai false positive
+    // ================================================================
     if (rangeIndices) {
-      exportUrl += `&portrait=false`;        // Landscape → 432mm lebar
-      exportUrl += `&size=TABLOID`;          // 17"x11" (432x279mm)
-      exportUrl += `&fitw=true`;             // Scale content to fit page width
-      exportUrl += `&top_margin=0.2`;        // Minimal margin
-      exportUrl += `&bottom_margin=0.2`;
-      exportUrl += `&left_margin=0.2`;
-      exportUrl += `&right_margin=0.2`;
+      const columnCount = rangeIndices.c2 - rangeIndices.c1;
       
-      googleLog.info('Range export: TABLOID landscape, fitw=true', rangeIndices);
+      // Pilih ukuran kertas berdasarkan jumlah kolom
+      let paperSize, isPortrait;
+      if (columnCount <= 3) {
+        paperSize = 'LETTER';    // 8.5"x11" (215.9x279.4mm)
+        isPortrait = true;       // Portrait untuk sempit
+      } else if (columnCount <= 7) {
+        paperSize = 'TABLOID';   // 17"x11" (432x279mm)
+        isPortrait = false;      // Landscape untuk lebar
+      } else {
+        paperSize = 'TABLOID';   // 17"x11" landscape
+        isPortrait = false;
+      }
+      
+      exportUrl += `&portrait=${isPortrait ? 'true' : 'false'}`;
+      exportUrl += `&size=${paperSize}`;
+      exportUrl += `&fitw=true`;             // Scale content fit width
+      exportUrl += `&fith=true`;             // Scale content fit height (baru!)
+      exportUrl += `&top_margin=0`;          // Zero margin
+      exportUrl += `&bottom_margin=0`;
+      exportUrl += `&left_margin=0`;
+      exportUrl += `&right_margin=0`;
+      
+      googleLog.info('Range export: Adaptive paper', { rangeIndices, columnCount, paperSize, isPortrait: isPortrait ? 'portrait' : 'landscape' });
     } else {
       exportUrl += `&portrait=true`;         // Portrait untuk full sheet
       exportUrl += `&size=A4`;               // Ukuran A4
       exportUrl += `&fitw=true`;             // Fit to width
-      exportUrl += `&top_margin=0.5`;        // Small margin
-      exportUrl += `&bottom_margin=0.5`;
-      exportUrl += `&left_margin=0.5`;
-      exportUrl += `&right_margin=0.5`;
+      exportUrl += `&top_margin=0`;          // Zero margin
+      exportUrl += `&bottom_margin=0`;
+      exportUrl += `&left_margin=0`;
+      exportUrl += `&right_margin=0`;
     }
     
     // Jika sheet GID diberikan, export sheet tertentu

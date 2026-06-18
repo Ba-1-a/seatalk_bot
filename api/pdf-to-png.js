@@ -7,13 +7,13 @@
  * - Cloudflare Worker export spreadsheet ke PDF via Google Drive API
  * - Kirim PDF (base64) ke endpoint ini
  * - Vercel render PDF menggunakan pdfjs-dist via page.setContent()
- * - page.setContent() tidak punya batasan size data: URI
+ * - Hasil PNG di-trim otomatis dengan sharp.trim() untuk hilangkan whitespace
  * 
- * Kenapa page.setContent() bukan data: URI:
- * - data: URI dengan pdfjs-dist ~1.5MB menyebabkan ERR_ABORTED
- * - page.setContent() inject HTML langsung tanpa encoding URI
- * - @sparticuz/chromium tidak support navigasi ke PDF (ERR_ABORTED)
- * - Tapi support JavaScript canvas dengan baik
+ * PERBAIKAN WHITESPACE:
+ * - Sebelumnya: Browser-side JS cropping (scan pixel, lambat, tidak sempurna)
+ * - Sekarang: sharp.trim() di server-side (C++ native, <100ms, pixel-perfect)
+ * - sharp.trim() di keempat sisi (top, right, bottom, left)
+ * - Tidak perlu lagi per-page crop di browser
  * 
  * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
@@ -21,6 +21,7 @@
 
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
+import sharp from 'sharp';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -31,18 +32,19 @@ export const config = {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Build HTML viewer untuk render PDF dengan pdfjs-dist
+ * Sekarang sederhana: render semua page tanpa cropping logic
+ * Cropping dilakukan oleh sharp.trim() di server-side
+ */
 function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
-  // Embed pdf.min.js content and worker as blob URL
-  // NO padding/margin/background - only pure canvas content
-  // Setelah render, crop tiap canvas ke bounding box konten non-putih
-  // agar container hanya selebar konten yang sebenarnya (hilangkan whitespace)
   return `<!DOCTYPE html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{background:#fff;font-family:sans-serif}
+html,body{background:#fff;font-family:sans-serif;display:flex;align-items:flex-start;justify-content:flex-start}
 #c{display:flex;flex-direction:column;align-items:flex-start;gap:0}
 .pw{display:inline-block;line-height:0}
 .pw canvas{display:block;margin:0;padding:0}
@@ -83,82 +85,6 @@ ${pdfjsCode}
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
-    // === CROP EACH CANVAS TO CONTENT BOUNDING BOX ===
-    // 1. Scan pixels, find tight bounding box of non-white content
-    // 2. Then aggressively trim right edge whitespace (columns with >99% white)
-    // This removes the leftover whitespace on the right side
-    var canvases = c.querySelectorAll('canvas');
-    var totalH = 0;
-    canvases.forEach(function(cv){
-      var ctx = cv.getContext('2d');
-      var w = cv.width, h = cv.height;
-      var imageData = ctx.getImageData(0,0,w,h);
-      var data = imageData.data;
-      var minX = w, minY = h, maxX = 0, maxY = 0;
-      var found = false;
-      // Sample every 2nd pixel — more precise for thin borders
-      for(var y=0;y<h;y+=2){
-        for(var x=0;x<w;x+=2){
-          var idx = (y*w+x)*4;
-          var r=data[idx], g=data[idx+1], b=data[idx+2];
-          // Non-white if any channel > 20 away from 255 (catch light grey borders)
-          if(Math.abs(r-255)>20||Math.abs(g-255)>20||Math.abs(b-255)>20){
-            if(x<minX)minX=x; if(y<minY)minY=y;
-            if(x>maxX)maxX=x; if(y>maxY)maxY=y;
-            found = true;
-          }
-        }
-      }
-      if(!found) return; // canvas kosong, skip
-      // Add 3px padding
-      minX=Math.max(0,minX-3); minY=Math.max(0,minY-3);
-      maxX=Math.min(w-1,maxX+3); maxY=Math.min(h-1,maxY+3);
-      var newW = maxX-minX+1, newH = maxY-minY+1;
-      // Draw cropped region into a temp canvas, then replace
-      var tmp = document.createElement('canvas');
-      tmp.width=newW; tmp.height=newH;
-      var tmpCtx = tmp.getContext('2d');
-      tmpCtx.drawImage(cv, minX,minY, newW,newH, 0,0, newW,newH);
-      cv.width = newW; cv.height = newH;
-      cv.style.width = newW+'px'; cv.style.height = newH+'px';
-      ctx.drawImage(tmp,0,0);
-      
-      // === AGGRESSIVE RIGHT-EDGE TRIM ===
-      // Scan columns from right to left, trim any column that's >99% white
-      // This specifically removes the leftover whitespace on the right side
-      w = cv.width; h = cv.height;
-      imageData = ctx.getImageData(0,0,w,h);
-      data = imageData.data;
-      var trimRight = 0;
-      for(var x=w-1;x>=0;x--){
-        var nonWhite = 0, total = 0;
-        for(var y=0;y<h;y+=2){
-          var idx = (y*w+x)*4;
-          var r=data[idx], g=data[idx+1], b=data[idx+2];
-          total++;
-          // Count non-white pixels (threshold > 20 from 255)
-          if(Math.abs(r-255)>20||Math.abs(g-255)>20||Math.abs(b-255)>20){
-            nonWhite++;
-          }
-        }
-        // If this column has >1% non-white pixels, stop trimming
-        if(total > 0 && nonWhite / total > 0.01) break;
-        trimRight++;
-      }
-      // Only trim if there's significant whitespace on the right (>5px)
-      if(trimRight > 5){
-        newW = w - trimRight;
-        tmp = document.createElement('canvas');
-        tmp.width=newW; tmp.height=h;
-        tmpCtx = tmp.getContext('2d');
-        tmpCtx.drawImage(cv, 0,0, newW,h, 0,0, newW,h);
-        cv.width = newW; cv.height = h;
-        cv.style.width = newW+'px'; cv.style.height = h+'px';
-        ctx.drawImage(tmp,0,0);
-      }
-      // Update parent wrapper width
-      if(cv.parentElement) cv.parentElement.style.width = cv.width+'px';
-    });
     s.textContent='Selesai';
     URL.revokeObjectURL(wu);
     document.body.dataset.ready='true';
@@ -207,10 +133,7 @@ export default async function handler(req, res) {
     const b64 = buf.toString('base64');
     console.log(`PDF: ${buf.length}B`);
 
-    // Launch browser with 4K default viewport
-    // CRITICAL: defaultViewport HARUS diset (tidak boleh null, crash screenshot)
-    // 2560px lebar cukup untuk Tabloid landscape di scale 2x
-    // fullPage:true akan menangkap konten di luar viewport
+    // Launch browser
     const exe = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (await chromium.executablePath());
     browser = await puppeteer.launch({
       args: [...chromium.args, '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
@@ -242,17 +165,31 @@ export default async function handler(req, res) {
       document.getElementById('s').style.display = 'none';
     });
 
-    var png = await page.screenshot({
+    // Take screenshot
+    var rawPng = await page.screenshot({
       type: 'png',
       fullPage: true,
       omitBackground: false
     });
-    console.log(`PNG: ${png.length}B`);
+    console.log(`Raw PNG: ${rawPng.length}B`);
+
+    // ================================================================
+    // SERVER-SIDE TRIM WITH SHARP
+    // Auto-crop whitespace dari keempat sisi gambar
+    // sharp.trim() menggunakan threshold 10 (default) — pixel dengan
+    // brightness > 245 dari 255 dianggap background
+    // ================================================================
+    const trimmedPng = await sharp(rawPng)
+      .trim({ threshold: 10, background: { r: 255, g: 255, b: 255 } })
+      .png()
+      .toBuffer();
+
+    console.log(`Trimmed PNG: ${trimmedPng.length}B (saved ${rawPng.length - trimmedPng.length}B)`);
 
     return res.status(200)
       .setHeader('Content-Type', 'image/png')
-      .setHeader('Content-Length', png.length)
-      .send(png);
+      .setHeader('Content-Length', trimmedPng.length)
+      .send(trimmedPng);
 
   } catch (err) {
     console.error('Error:', err);
