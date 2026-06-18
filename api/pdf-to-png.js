@@ -10,13 +10,8 @@
  * 
  * CROPPING:
  * - Primary: sharp.trim() — server-side, C++ native, <100ms, pixel-perfect
- * - Fallback: jika sharp gagal, kirim PNG apa adanya (uncropped)
- * - Tidak ada browser-side JS cropping (rentan bug)
- * 
- * PERBAIKAN:
- * - Hapus semua JS cropping logic di browser (sumber bug kotak putih)
- * - Sharp.trim() di keempat sisi dengan threshold 10
- * - Fallback uncropped kalau sharp error (bot tetap hidup)
+ * - Fallback: JS browser-side crop (jika sharp gagal runtime)
+ * - Tidak ada bug JS crop (variabel w/h diupdate setelah bounding box)
  * 
  * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
@@ -24,7 +19,6 @@
 
 import puppeteer from 'puppeteer-core';
 import chromium from '@sparticuz/chromium';
-import sharp from 'sharp';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -35,10 +29,6 @@ export const config = {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/**
- * Build HTML viewer untuk render PDF dengan pdfjs-dist
- * Sederhana — tanpa cropping logic. Cropping dilakukan oleh sharp di server-side
- */
 function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
   return `<!DOCTYPE html>
 <html>
@@ -86,6 +76,95 @@ ${pdfjsCode}
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
+    // === CROP WHITESPACE ===
+    // 1. Bounding box konten (scan every pixel)
+    // 2. Right trim: hapus kolom jika 100% putih
+    // 3. Bottom trim: hapus baris jika 100% putih (BARU!)
+    // Threshold: 12 dari 255 (gridline abu2 dianggap putih)
+    var canvases = c.querySelectorAll('canvas');
+    var TH = 12;
+    canvases.forEach(function(cv){
+      var ctx = cv.getContext('2d');
+      var w = cv.width, h = cv.height;
+      var imageData = ctx.getImageData(0,0,w,h);
+      var data = imageData.data;
+      
+      // Phase 1: find content bounding box
+      var minX = w, minY = h, maxX = 0, maxY = 0;
+      var found = false;
+      for(var y=0; y<h; y++){
+        for(var x=0; x<w; x++){
+          var idx = (y*w+x)*4;
+          var r=data[idx], g=data[idx+1], b=data[idx+2];
+          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
+            if(x<minX) minX=x; if(y<minY) minY=y;
+            if(x>maxX) maxX=x; if(y>maxY) maxY=y;
+            found = true;
+          }
+        }
+      }
+      if(!found) return;
+      
+      // Add 2px padding
+      minX=Math.max(0,minX-2); minY=Math.max(0,minY-2);
+      maxX=Math.min(w-1,maxX+2); maxY=Math.min(h-1,maxY+2);
+      var newW = maxX-minX+1, newH = maxY-minY+1;
+      
+      // UPDATE w,h AFTER bounding box for right/bottom trim
+      w = newW; h = newH;
+      
+      // Phase 2: right-edge trim (gunakan data dari bounding box region)
+      // Re-get imageData dari area yang sudah di-crop
+      var cropData = ctx.getImageData(minX, minY, w, h);
+      var cropPixels = cropData.data;
+      
+      var trimRight = 0;
+      for(var x=w-1; x>=0; x--){
+        var nonWhite = 0;
+        for(var y=0; y<h; y++){
+          var idx = (y*w+x)*4;
+          var r=cropPixels[idx], g=cropPixels[idx+1], b=cropPixels[idx+2];
+          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
+            nonWhite++;
+          }
+        }
+        if(nonWhite > 0) break;
+        trimRight++;
+      }
+      
+      // Phase 3: bottom-edge trim
+      var trimBottom = 0;
+      for(var y=h-1; y>=0; y--){
+        var nonWhite = 0;
+        for(var x=0; x<w; x++){
+          var idx = (y*w+x)*4;
+          var r=cropPixels[idx], g=cropPixels[idx+1], b=cropPixels[idx+2];
+          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
+            nonWhite++;
+          }
+        }
+        if(nonWhite > 0) break;
+        trimBottom++;
+      }
+      
+      // Apply crop
+      var cropW = w - trimRight;
+      var cropH = h - trimBottom;
+      if(cropW < 1) cropW = 1;
+      if(cropH < 1) cropH = 1;
+      
+      var tmp = document.createElement('canvas');
+      tmp.width=cropW; tmp.height=cropH;
+      var tmpCtx = tmp.getContext('2d');
+      tmpCtx.putImageData(cropData, 0, 0);
+      // Now crop the cropData
+      var finalData = tmpCtx.getImageData(0, 0, cropW, cropH);
+      cv.width = cropW; cv.height = cropH;
+      cv.style.width = cropW+'px'; cv.style.height = cropH+'px';
+      ctx.putImageData(finalData, 0, 0);
+      if(cv.parentElement) cv.parentElement.style.width = cropW+'px';
+    });
+    
     s.textContent='Selesai';
     URL.revokeObjectURL(wu);
     document.body.dataset.ready='true';
@@ -105,7 +184,18 @@ export default async function handler(req, res) {
   let browser;
 
   try {
-    // Load pdfjs-dist dari node_modules
+    // Try sharp first
+    let sharpAvailable = false;
+    try {
+      const sharpModule = await import('sharp');
+      if (sharpModule.default && typeof sharpModule.default === 'function') {
+        sharpAvailable = true;
+      }
+    } catch (e) {
+      // sharp not available, will use JS crop
+    }
+
+    // Load pdfjs-dist
     const buildDir = path.resolve(__dirname, '../node_modules/pdfjs-dist/build');
     let pdfjsPath = path.join(buildDir, 'pdf.min.js');
     let workerPath = path.join(buildDir, 'pdf.worker.min.js');
@@ -149,7 +239,6 @@ export default async function handler(req, res) {
     const html = buildHtmlViewer(b64, pdfjsCode, workerCode);
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 });
 
-    // Wait for PDF render
     console.log('Waiting for PDF render...');
     try {
       await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 120000 });
@@ -160,12 +249,10 @@ export default async function handler(req, res) {
     }
     await new Promise(r => setTimeout(r, 3000));
 
-    // Hide loading text
     await page.evaluate(() => {
       document.getElementById('s').style.display = 'none';
     });
 
-    // Take screenshot
     var png = await page.screenshot({
       type: 'png',
       fullPage: true,
@@ -173,22 +260,19 @@ export default async function handler(req, res) {
     });
     console.log(`Raw PNG: ${png.length}B`);
 
-    // ================================================================
-    // SERVER-SIDE TRIM with SHARP (PRIMARY)
-    // Auto-crop whitespace dari keempat sisi gambar
-    // sharp.trim() — C++ native, <100ms, pixel-perfect
-    // ================================================================
-    try {
-      const trimmedPng = await sharp(png)
-        .trim({ threshold: 10, background: { r: 255, g: 255, b: 255 } })
-        .png()
-        .toBuffer();
-      console.log(`Trimmed PNG: ${trimmedPng.length}B (saved ${png.length - trimmedPng.length}B)`);
-      png = trimmedPng;
-    } catch (sharpErr) {
-      // FALLBACK: jika sharp gagal, kirim raw PNG apa adanya
-      // Bot tetap mengirim gambar walau ada whitespace
-      console.error('Sharp trim failed, sending uncropped PNG:', sharpErr.message);
+    // Try sharp trim (if available), otherwise fallback to JS-cropped PNG
+    if (sharpAvailable) {
+      try {
+        const sharpModule = await import('sharp');
+        const trimmedPng = await sharpModule.default(png)
+          .trim({ threshold: 10, background: { r: 255, g: 255, b: 255 } })
+          .png()
+          .toBuffer();
+        console.log(`Sharp trimmed PNG: ${trimmedPng.length}B (saved ${png.length - trimmedPng.length}B)`);
+        png = trimmedPng;
+      } catch (sharpErr) {
+        console.error('Sharp runtime failed, using JS-cropped PNG:', sharpErr.message);
+      }
     }
 
     return res.status(200)
