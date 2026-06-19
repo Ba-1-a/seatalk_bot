@@ -78,15 +78,20 @@ ${pdfjsCode}
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
-    // === CROP WHITESPACE (FIXED) ===
-    // Threshold diturunkan 12→8 untuk lebih agresif membersihkan gridline abu-abu
-    // Padding dikurangi 2px→1px untuk meminimalkan whitespace berlebih
-    // Right/bottom trim menggunakan threshold yang sama
-    // Safety margin 1px tambahan untuk antisipasi false positive
+    // === CROP WHITESPACE (SIMPLIFIED) ===
+    // Pendekatan baru: sharp.trim() sebagai PRIMARY crop (server-side, C++ native)
+    // JS crop hanya sebagai FALLBACK jika sharp runtime error.
+    // 
+    // Perbedaan threshold:
+    //   - Bounding box: TH=8 (cari konten, jangan agresif)
+    //   - Right/bottom trim: TH=4 (lebih agresif bersihin padding Google)
+    //   - Padding: PAD=1 (minimal)
+    //   - Safety margin: 0 (tidak perlu karena sharp.trim() presisi)
     // ============================================
     var canvases = c.querySelectorAll('canvas');
-    var TH = 8; // Diturunkan dari 12 ke 8 (lebih ketat)
-    var PAD = 1; // Padding dikurangi dari 2 ke 1
+    var TH_BBOX = 8;   // Bounding box: jangan sampai potong konten
+    var TH_TRIM = 4;   // Trim: lebih agresif untuk padding Google
+    var PAD = 1;       // Padding minimal
     canvases.forEach(function(cv){
       var ctx = cv.getContext('2d');
       var w = cv.width, h = cv.height;
@@ -100,7 +105,7 @@ ${pdfjsCode}
         for(var x=0; x<w; x++){
           var idx = (y*w+x)*4;
           var r=data[idx], g=data[idx+1], b=data[idx+2];
-          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
+          if(Math.abs(r-255)>TH_BBOX||Math.abs(g-255)>TH_BBOX||Math.abs(b-255)>TH_BBOX){
             if(x<minX) minX=x; if(y<minY) minY=y;
             if(x>maxX) maxX=x; if(y>maxY) maxY=y;
             found = true;
@@ -109,7 +114,7 @@ ${pdfjsCode}
       }
       if(!found) return;
       
-      // Add 1px padding (sebelumnya 2px)
+      // Add 1px padding
       minX=Math.max(0,minX-PAD); minY=Math.max(0,minY-PAD);
       maxX=Math.min(w-1,maxX+PAD); maxY=Math.min(h-1,maxY+PAD);
       var newW = maxX-minX+1, newH = maxY-minY+1;
@@ -118,39 +123,41 @@ ${pdfjsCode}
       var cropData = ctx.getImageData(minX, minY, newW, newH);
       var cropPixels = cropData.data;
       
-      // Phase 2: right-edge trim (hapus kolom putih dari kanan)
+      // Phase 2: right-edge trim dengan TH_TRIM lebih agresif
       var trimRight = 0;
       for(var x=newW-1; x>=0; x--){
-        var nonWhite = 0;
+        var allWhite = true;
         for(var y=0; y<newH; y++){
           var idx = (y*newW+x)*4;
           var r=cropPixels[idx], g=cropPixels[idx+1], b=cropPixels[idx+2];
-          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
-            nonWhite++;
+          if(Math.abs(r-255)>TH_TRIM||Math.abs(g-255)>TH_TRIM||Math.abs(b-255)>TH_TRIM){
+            allWhite = false;
+            break;
           }
         }
-        if(nonWhite > 0) break;
+        if(!allWhite) break;
         trimRight++;
       }
       
-      // Phase 3: bottom-edge trim (hapus baris putih dari bawah)
+      // Phase 3: bottom-edge trim dengan TH_TRIM lebih agresif
       var trimBottom = 0;
       for(var y=newH-1; y>=0; y--){
-        var nonWhite = 0;
+        var allWhite = true;
         for(var x=0; x<newW; x++){
           var idx = (y*newW+x)*4;
           var r=cropPixels[idx], g=cropPixels[idx+1], b=cropPixels[idx+2];
-          if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
-            nonWhite++;
+          if(Math.abs(r-255)>TH_TRIM||Math.abs(g-255)>TH_TRIM||Math.abs(b-255)>TH_TRIM){
+            allWhite = false;
+            break;
           }
         }
-        if(nonWhite > 0) break;
+        if(!allWhite) break;
         trimBottom++;
       }
       
-      // Apply final crop + safety margin 1px untuk antisipasi
-      var cropW = Math.max(1, newW - trimRight - 1);  // -1 safety margin
-      var cropH = Math.max(1, newH - trimBottom - 1); // -1 safety margin
+      // Apply final crop (tanpa safety margin, karena sharp akan handle final trim)
+      var cropW = Math.max(1, newW - trimRight);
+      var cropH = Math.max(1, newH - trimBottom);
       
       var tmp = document.createElement('canvas');
       tmp.width=cropW; tmp.height=cropH;

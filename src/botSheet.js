@@ -340,50 +340,59 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&pagenum=false`;            // No page numbers
     
     // ================================================================
-    // PERBAIKAN: Adaptive paper size berdasarkan range + margin 0
+    // ADAPTIVE PAPER SIZE (FIXED WHITESPACE ISSUE)
     // ================================================================
-    // Masalah: Range kecil (A1:B5) di halaman TABLOID(17"x11") menghasilkan
-    // banyak whitespace di kanan dan bawah karena kertas terlalu besar.
+    // Masalah: Range kecil (A1:B5) di LETTER/TABLOID menghasilkan
+    // whitespace besar karena kertas terlalu besar untuk konten.
     // 
-    // Solusi: Pilih ukuran kertas sesuai jumlah kolom pada range:
-    //   - 1-3 kolom  → LETTER (8.5"x11") — pas untuk range sempit
-    //   - 4-7 kolom  → TABLOID (17"x11") — cukup untuk range medium
+    // Solusi (lebih agresif):
+    //   - 1 kolom    → STATEMENT (5.5"x8.5") — paling kecil
+    //   - 2-3 kolom  → EXECUTIVE (7.25"x10.5") — medium sempit
+    //   - 4-7 kolom  → TABLOID (17"x11") — medium lebar
     //   - 8+ kolom   → TABLOID — lebar maksimal
     // 
     // Fitur tambahan:
-    //   - fitw=true + fith=true → konten di-shrink pas di kedua sumbu
-    //   - margin=0 → benar-benar tanpa margin
+    //   - fith=true (BARU!) → konten di-fit di kedua sumbu
+    //     Sebelumnya hanya fitw=true → height tidak di-scale
+    //   - fitw=true + fith=true → konten pas di kertas di semua axis
+    //   - margin=0 → tanpa margin eksternal
     //   - gridlines=false → tidak ada garis grid sebagai false positive
     // ================================================================
     if (rangeIndices) {
       const columnCount = rangeIndices.c2 - rangeIndices.c1;
       
-      // Pilih ukuran kertas berdasarkan jumlah kolom
+      // Pilih ukuran kertas berdasarkan jumlah kolom (lebih agresif)
       let paperSize, isPortrait;
-      if (columnCount <= 3) {
-        paperSize = 'LETTER';    // 8.5"x11" (215.9x279.4mm)
-        isPortrait = true;       // Portrait untuk sempit
+      if (columnCount <= 1) {
+        paperSize = 'STATEMENT';  // 5.5"x8.5" — paling minimal
+        isPortrait = true;
+      } else if (columnCount <= 3) {
+        paperSize = 'EXECUTIVE';  // 7.25"x10.5" — medium sempit
+        isPortrait = true;
       } else if (columnCount <= 7) {
-        paperSize = 'TABLOID';   // 17"x11" (432x279mm)
-        isPortrait = false;      // Landscape untuk lebar
+        paperSize = 'TABLOID';    // 17"x11" — medium lebar
+        isPortrait = false;
       } else {
-        paperSize = 'TABLOID';   // 17"x11" landscape
+        paperSize = 'TABLOID';    // 17"x11" landscape
         isPortrait = false;
       }
       
       exportUrl += `&portrait=${isPortrait ? 'true' : 'false'}`;
       exportUrl += `&size=${paperSize}`;
-      exportUrl += `&fitw=true`;             // Scale content fit width
+      // Fit BOTH axes: konten di-shrink di lebar dan tinggi
+      exportUrl += `&fitw=true`;
+      exportUrl += `&fith=true`;              // FIT HEIGHT (BARU!) 
       exportUrl += `&top_margin=0`;          // Zero margin
       exportUrl += `&bottom_margin=0`;
       exportUrl += `&left_margin=0`;
       exportUrl += `&right_margin=0`;
       
-      googleLog.info('Range export: Adaptive paper', { rangeIndices, columnCount, paperSize, isPortrait: isPortrait ? 'portrait' : 'landscape' });
+      googleLog.info('Range export: Aggressive adaptive paper', { rangeIndices, columnCount, paperSize, isPortrait: isPortrait ? 'portrait' : 'landscape' });
     } else {
       exportUrl += `&portrait=true`;         // Portrait untuk full sheet
       exportUrl += `&size=A4`;               // Ukuran A4
       exportUrl += `&fitw=true`;             // Fit to width
+      exportUrl += `&fith=true`;             // Fit to height (BARU!)
       exportUrl += `&top_margin=0`;          // Zero margin
       exportUrl += `&bottom_margin=0`;
       exportUrl += `&left_margin=0`;
