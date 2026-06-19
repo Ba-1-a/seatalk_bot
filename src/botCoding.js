@@ -173,9 +173,9 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
     // 6. Jalankan model AI
     const reply = await getAiReply(env, systemPrompt, session.history, AI_MODELS.CHAT_GENERAL);
     
-    // 7. Simpan balasan ke KV
+    // 7. Simpan balasan ke KV (TTL: 2 jam agar percakapan lebih awet)
     session.history.push({ role: "assistant", content: reply });
-    await env.BOT_MEMORY.put(kvKey, JSON.stringify(session), { expirationTtl: 3600 });
+    await env.BOT_MEMORY.put(kvKey, JSON.stringify(session), { expirationTtl: 7200 });
 
     // 8. Auto-threading untuk jawaban panjang di grup
     const wordCount = countWords(reply);

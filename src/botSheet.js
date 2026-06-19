@@ -68,34 +68,94 @@ async function getGoogleToken(env) {
             googleLog.debug('Google OAuth token loaded from cache');
             return cachedToken;
         }
-    } catch (err) {}
+    } catch (err) {
+        googleLog.debug('Cache read failed (non-critical), generating new token');
+    }
 
     const now = Math.floor(Date.now() / 1000);
     
-    if (!env.GOOGLE_PRIVATE_KEY) {
-        throw new Error("GOOGLE_PRIVATE_KEY belum di-set di Cloudflare Workers. Jalankan: npx wrangler secret put GOOGLE_PRIVATE_KEY");
+    // Validasi: Pastikan semua required credential tersedia
+    const missingCredentials = [];
+    if (!env.GOOGLE_PRIVATE_KEY) missingCredentials.push('GOOGLE_PRIVATE_KEY');
+    if (!env.GOOGLE_CLIENT_EMAIL) missingCredentials.push('GOOGLE_CLIENT_EMAIL');
+    
+    if (missingCredentials.length > 0) {
+        throw new Error(
+            `Google credentials tidak lengkap: ${missingCredentials.join(', ')}. ` +
+            `Jalankan: npx wrangler secret put ${missingCredentials[0]}`
+        );
     }
     googleLog.info('Generating new Google OAuth token via JWT');
     
-    let pemKey = env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n');
-    const privateKey = await importPKCS8(pemKey, 'RS256');
+    // Handle berbagai format GOOGLE_PRIVATE_KEY:
+    // 1. Dari wrangler secret: biasanya ada \\n literal (escaped newline)
+    // 2. Dari environment variable: ada \n actual newline
+    // 3. Dari JSON langsung: ada \n actual newline
+    let pemKey = env.GOOGLE_PRIVATE_KEY;
+    
+    // Jika mengandung literal \\n, convert ke actual newline
+    if (pemKey.includes('\\n')) {
+        pemKey = pemKey.replace(/\\n/g, '\n');
+    }
+    
+    // Pastikan ada header/footer PEM yang benar
+    if (!pemKey.includes('-----BEGIN PRIVATE KEY-----')) {
+        // Mungkin key-nya terpotong atau format salah
+        throw new Error('GOOGLE_PRIVATE_KEY tidak valid: tidak ditemukan header "BEGIN PRIVATE KEY"');
+    }
+    
+    let privateKey;
+    try {
+        privateKey = await importPKCS8(pemKey, 'RS256');
+    } catch (keyErr) {
+        googleLog.error('Failed to parse GOOGLE_PRIVATE_KEY', { error: keyErr.message });
+        throw new Error(
+            'Gagal memparse GOOGLE_PRIVATE_KEY. Pastikan formatnya benar.\n' +
+            'Coba set ulang: cat google-key.pem | npx wrangler secret put GOOGLE_PRIVATE_KEY\n' +
+            `Detail: ${keyErr.message}`
+        );
+    }
 
-    const jwt = await new SignJWT({
-        iss: env.GOOGLE_CLIENT_EMAIL,
-        scope: "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly",
-        aud: "https://oauth2.googleapis.com/token",
-        exp: now + 3600, iat: now,
-    }).setProtectedHeader({ alg: 'RS256', typ: 'JWT' }).sign(privateKey);
+    let jwt;
+    try {
+        jwt = await new SignJWT({
+            iss: env.GOOGLE_CLIENT_EMAIL,
+            scope: "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly",
+            aud: "https://oauth2.googleapis.com/token",
+            exp: now + 3600, iat: now,
+        }).setProtectedHeader({ alg: 'RS256', typ: 'JWT' }).sign(privateKey);
+    } catch (jwtErr) {
+        googleLog.error('JWT signing failed', { error: jwtErr.message });
+        throw new Error(`Gagal membuat JWT untuk Google OAuth: ${jwtErr.message}`);
+    }
 
-    const res = await fetch("https://oauth2.googleapis.com/token", {
-        method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
-    });
+    let res;
+    try {
+        res = await fetch("https://oauth2.googleapis.com/token", {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: `grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer&assertion=${jwt}`
+        });
+    } catch (fetchErr) {
+        googleLog.error('Google OAuth network error', { error: fetchErr.message });
+        throw new Error(`Gagal terhubung ke Google OAuth server: ${fetchErr.message}`);
+    }
 
     const data = await parseJsonResponse(res, "Google OAuth token");
-    if (!data?.access_token) {
-        throw new Error("Tidak dapat mengambil token Google");
+    if (!data) {
+        throw new Error(`Google OAuth merespon dengan status ${res.status} dan body tidak valid`);
+    }
+    if (!data.access_token) {
+        const errorDesc = data.error_description || data.error || 'unknown error';
+        googleLog.error('Google OAuth token failed', { 
+            status: res.status,
+            error: errorDesc,
+            fullResponse: JSON.stringify(data).substring(0, 200)
+        });
+        throw new Error(
+            `Google OAuth gagal: ${errorDesc}. ` +
+            `Pastikan Service Account (${env.GOOGLE_CLIENT_EMAIL}) aktif dan private key valid.`
+        );
     }
     await env.BOT_MEMORY.put(cacheKey, data.access_token, { expirationTtl: 3000 });
     googleLog.info('Google OAuth token obtained and cached');

@@ -8,10 +8,12 @@
  * - Kirim PDF (base64) ke endpoint ini
  * - Vercel render PDF menggunakan pdfjs-dist via page.setContent()
  * 
- * CROPPING:
+ * CROPPING (FIXED WHITESPACE ISSUE):
  * - Primary: sharp.trim() — server-side, C++ native, <100ms, pixel-perfect
+ *   Threshold: 8 (lebih ketat dari sebelumnya 12, untuk bersihkan gridline abu-abu)
+ *   Padding: 1px (dari sebelumnya 2px, kurangi whitespace berlebih)
  * - Fallback: JS browser-side crop (jika sharp gagal runtime)
- * - Tidak ada bug JS crop (variabel w/h diupdate setelah bounding box)
+ *   Threshold sinkron: 8, padding sinkron: 1px
  * 
  * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
@@ -76,20 +78,22 @@ ${pdfjsCode}
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
-    // === CROP WHITESPACE ===
-    // 1. Bounding box konten (scan every pixel)
-    // 2. Right trim: hapus kolom jika 100% putih
-    // 3. Bottom trim: hapus baris jika 100% putih (BARU!)
-    // Threshold: 12 dari 255 (gridline abu-abu dianggap putih)
+    // === CROP WHITESPACE (FIXED) ===
+    // Threshold diturunkan 12→8 untuk lebih agresif membersihkan gridline abu-abu
+    // Padding dikurangi 2px→1px untuk meminimalkan whitespace berlebih
+    // Right/bottom trim menggunakan threshold yang sama
+    // Safety margin 1px tambahan untuk antisipasi false positive
+    // ============================================
     var canvases = c.querySelectorAll('canvas');
-    var TH = 12;
+    var TH = 8; // Diturunkan dari 12 ke 8 (lebih ketat)
+    var PAD = 1; // Padding dikurangi dari 2 ke 1
     canvases.forEach(function(cv){
       var ctx = cv.getContext('2d');
       var w = cv.width, h = cv.height;
       var imageData = ctx.getImageData(0,0,w,h);
       var data = imageData.data;
       
-      // Phase 1: find content bounding box
+      // Phase 1: find content bounding box (scan every pixel)
       var minX = w, minY = h, maxX = 0, maxY = 0;
       var found = false;
       for(var y=0; y<h; y++){
@@ -105,24 +109,21 @@ ${pdfjsCode}
       }
       if(!found) return;
       
-      // Add 2px padding
-      minX=Math.max(0,minX-2); minY=Math.max(0,minY-2);
-      maxX=Math.min(w-1,maxX+2); maxY=Math.min(h-1,maxY+2);
+      // Add 1px padding (sebelumnya 2px)
+      minX=Math.max(0,minX-PAD); minY=Math.max(0,minY-PAD);
+      maxX=Math.min(w-1,maxX+PAD); maxY=Math.min(h-1,maxY+PAD);
       var newW = maxX-minX+1, newH = maxY-minY+1;
       
-      // UPDATE w,h AFTER bounding box for right/bottom trim
-      w = newW; h = newH;
-      
-      // Phase 2: right-edge trim (gunakan data dari bounding box region)
-      // Re-get imageData dari area yang sudah di-crop
-      var cropData = ctx.getImageData(minX, minY, w, h);
+      // Get crop region data
+      var cropData = ctx.getImageData(minX, minY, newW, newH);
       var cropPixels = cropData.data;
       
+      // Phase 2: right-edge trim (hapus kolom putih dari kanan)
       var trimRight = 0;
-      for(var x=w-1; x>=0; x--){
+      for(var x=newW-1; x>=0; x--){
         var nonWhite = 0;
-        for(var y=0; y<h; y++){
-          var idx = (y*w+x)*4;
+        for(var y=0; y<newH; y++){
+          var idx = (y*newW+x)*4;
           var r=cropPixels[idx], g=cropPixels[idx+1], b=cropPixels[idx+2];
           if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
             nonWhite++;
@@ -132,12 +133,12 @@ ${pdfjsCode}
         trimRight++;
       }
       
-      // Phase 3: bottom-edge trim
+      // Phase 3: bottom-edge trim (hapus baris putih dari bawah)
       var trimBottom = 0;
-      for(var y=h-1; y>=0; y--){
+      for(var y=newH-1; y>=0; y--){
         var nonWhite = 0;
-        for(var x=0; x<w; x++){
-          var idx = (y*w+x)*4;
+        for(var x=0; x<newW; x++){
+          var idx = (y*newW+x)*4;
           var r=cropPixels[idx], g=cropPixels[idx+1], b=cropPixels[idx+2];
           if(Math.abs(r-255)>TH||Math.abs(g-255)>TH||Math.abs(b-255)>TH){
             nonWhite++;
@@ -147,17 +148,14 @@ ${pdfjsCode}
         trimBottom++;
       }
       
-      // Apply crop
-      var cropW = w - trimRight;
-      var cropH = h - trimBottom;
-      if(cropW < 1) cropW = 1;
-      if(cropH < 1) cropH = 1;
+      // Apply final crop + safety margin 1px untuk antisipasi
+      var cropW = Math.max(1, newW - trimRight - 1);  // -1 safety margin
+      var cropH = Math.max(1, newH - trimBottom - 1); // -1 safety margin
       
       var tmp = document.createElement('canvas');
       tmp.width=cropW; tmp.height=cropH;
       var tmpCtx = tmp.getContext('2d');
       tmpCtx.putImageData(cropData, 0, 0);
-      // Now crop the cropData
       var finalData = tmpCtx.getImageData(0, 0, cropW, cropH);
       cv.width = cropW; cv.height = cropH;
       cv.style.width = cropW+'px'; cv.style.height = cropH+'px';
@@ -266,13 +264,13 @@ export default async function handler(req, res) {
     console.log(`Raw PNG: ${png.length}B`);
 
     // Try sharp trim (if available), otherwise fallback to JS-cropped PNG
-    // Threshold 12: balance между whitespace removal dan content preservation
+    // Threshold 8: lebih ketat dari sebelumnya 12, untuk bersihkan gridline abu-abu
     if (sharpAvailable) {
       try {
         const sharpModule = await import('sharp');
-        console.log('Running sharp.trim() with threshold=12...');
+        console.log('Running sharp.trim() with threshold=8...');
         const trimmedPng = await sharpModule.default(png)
-          .trim({ threshold: 12, background: { r: 255, g: 255, b: 255 } })
+          .trim({ threshold: 8, background: { r: 255, g: 255, b: 255 } })
           .png()
           .toBuffer();
         console.log(`Sharp trimmed PNG: ${trimmedPng.length}B (saved ${png.length - trimmedPng.length}B)`);

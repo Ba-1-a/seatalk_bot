@@ -31,7 +31,16 @@ npm install
 # 3. Deploy to Cloudflare Workers
 echo ""
 echo "[3/4] Deploying to Cloudflare Workers..."
-export CLOUDFLARE_API_TOKEN="cfut_bc8SlAhJhsr7zpQhovoztYVaUbHkM1vG3deMQzL856825c05"
+echo "Menggunakan CLOUDFLARE_API_TOKEN dari environment variable..."
+echo "  - Jika belum set, jalankan:  set CLOUDFLARE_API_TOKEN=<token>"
+echo "  - Atau sesuaikan di terminal PowerShell sebelum menjalankan script ini."
+echo ""
+# CLOUDFLARE_API_TOKEN harus sudah di-set sebagai environment variable
+if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+  echo "⚠️  WARNING: CLOUDFLARE_API_TOKEN belum di-set!"
+  echo "    Set dulu: export CLOUDFLARE_API_TOKEN='token_anda_disini'"
+  exit 1
+fi
 npx wrangler deploy
 
 # 4. Push to GitHub
