@@ -340,60 +340,56 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&pagenum=false`;            // No page numbers
     
     // ================================================================
-    // ADAPTIVE PAPER SIZE (FIXED WHITESPACE ISSUE)
+    // ADAPTIVE PAPER SIZE (V4 - FIXED WHITESPACE + RANGE BESAR AMAN)
     // ================================================================
-    // Masalah: Range kecil (A1:B5) di LETTER/TABLOID menghasilkan
-    // whitespace besar karena kertas terlalu besar untuk konten.
+    // Masalah V3: fith=true diterapkan ke SEMUA range, termasuk range besar
+    // (8+ kolom), menyebabkan konten di-shrink vertikal → whitespace bawah.
     // 
-    // Solusi (lebih agresif):
-    //   - 1 kolom    → STATEMENT (5.5"x8.5") — paling kecil
-    //   - 2-3 kolom  → EXECUTIVE (7.25"x10.5") — medium sempit
-    //   - 4-7 kolom  → TABLOID (17"x11") — medium lebar
-    //   - 8+ kolom   → TABLOID — lebar maksimal
-    // 
-    // Fitur tambahan:
-    //   - fith=true (BARU!) → konten di-fit di kedua sumbu
-    //     Sebelumnya hanya fitw=true → height tidak di-scale
-    //   - fitw=true + fith=true → konten pas di kertas di semua axis
-    //   - margin=0 → tanpa margin eksternal
-    //   - gridlines=false → tidak ada garis grid sebagai false positive
+    // Solusi V4: Split parameter fith berdasarkan range:
+    //   - Range kecil (1-4 kolom): fith=true → konten pas di kedua sumbu
+    //   - Range besar (5+ kolom): fith=false → konten penuh vertikal (seperti asli)
+    //   - Paper size disesuaikan:
+    //     1-2 kolom → LETTER (8.5"x11") — minimal tapi cukup
+    //     3-4 kolom → EXECUTIVE (7.25"x10.5") — medium
+    //     5+ kolom  → TABLOID (17"x11") — lebar, fith=false
     // ================================================================
     if (rangeIndices) {
       const columnCount = rangeIndices.c2 - rangeIndices.c1;
       
-      // Pilih ukuran kertas berdasarkan jumlah kolom (lebih agresif)
-      let paperSize, isPortrait;
-      if (columnCount <= 1) {
-        paperSize = 'STATEMENT';  // 5.5"x8.5" — paling minimal
+      // Pilih ukuran kertas dan parameter fit
+      let paperSize, isPortrait, useFith;
+      if (columnCount <= 2) {
+        paperSize = 'LETTER';    // 8.5"x11"
         isPortrait = true;
-      } else if (columnCount <= 3) {
-        paperSize = 'EXECUTIVE';  // 7.25"x10.5" — medium sempit
+        useFith = true;          // fith untuk range kecil
+      } else if (columnCount <= 4) {
+        paperSize = 'EXECUTIVE'; // 7.25"x10.5"
         isPortrait = true;
-      } else if (columnCount <= 7) {
-        paperSize = 'TABLOID';    // 17"x11" — medium lebar
-        isPortrait = false;
+        useFith = true;          // fith untuk range medium-sempit
       } else {
-        paperSize = 'TABLOID';    // 17"x11" landscape
+        paperSize = 'TABLOID';   // 17"x11"
         isPortrait = false;
+        useFith = false;         // NO fith untuk range besar (cegah shrink vertikal)
       }
       
       exportUrl += `&portrait=${isPortrait ? 'true' : 'false'}`;
       exportUrl += `&size=${paperSize}`;
-      // Fit BOTH axes: konten di-shrink di lebar dan tinggi
       exportUrl += `&fitw=true`;
-      exportUrl += `&fith=true`;              // FIT HEIGHT (BARU!) 
-      exportUrl += `&top_margin=0`;          // Zero margin
+      if (useFith) {
+        exportUrl += `&fith=true`;  // Hanya untuk range kecil-sedang
+      }
+      exportUrl += `&top_margin=0`;
       exportUrl += `&bottom_margin=0`;
       exportUrl += `&left_margin=0`;
       exportUrl += `&right_margin=0`;
       
-      googleLog.info('Range export: Aggressive adaptive paper', { rangeIndices, columnCount, paperSize, isPortrait: isPortrait ? 'portrait' : 'landscape' });
+      googleLog.info('Range export: Adaptive paper V4', { rangeIndices, columnCount, paperSize, isPortrait, useFith });
     } else {
-      exportUrl += `&portrait=true`;         // Portrait untuk full sheet
-      exportUrl += `&size=A4`;               // Ukuran A4
-      exportUrl += `&fitw=true`;             // Fit to width
-      exportUrl += `&fith=true`;             // Fit to height (BARU!)
-      exportUrl += `&top_margin=0`;          // Zero margin
+      // Full sheet export (tanpa range)
+      exportUrl += `&portrait=true`;
+      exportUrl += `&size=A4`;
+      exportUrl += `&fitw=true`;
+      exportUrl += `&top_margin=0`;
       exportUrl += `&bottom_margin=0`;
       exportUrl += `&left_margin=0`;
       exportUrl += `&right_margin=0`;
