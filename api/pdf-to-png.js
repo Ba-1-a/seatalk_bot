@@ -80,9 +80,9 @@ ${pdfjsCode}
     // 1. Bounding box konten (scan every pixel)
     // 2. Right trim: hapus kolom jika 100% putih
     // 3. Bottom trim: hapus baris jika 100% putih (BARU!)
-    // Threshold: 12 dari 255 (gridline abu2 dianggap putih)
+    // Threshold: 8 dari 255 (lebih ketat, gridline abu-abu tipis dianggap putih)
     var canvases = c.querySelectorAll('canvas');
-    var TH = 12;
+    var TH = 8;
     canvases.forEach(function(cv){
       var ctx = cv.getContext('2d');
       var w = cv.width, h = cv.height;
@@ -105,9 +105,9 @@ ${pdfjsCode}
       }
       if(!found) return;
       
-      // Add 2px padding
-      minX=Math.max(0,minX-2); minY=Math.max(0,minY-2);
-      maxX=Math.min(w-1,maxX+2); maxY=Math.min(h-1,maxY+2);
+      // Add 1px padding (reduce from 2px to avoid extra whitespace)
+      minX=Math.max(0,minX-1); minY=Math.max(0,minY-1);
+      maxX=Math.min(w-1,maxX+1); maxY=Math.min(h-1,maxY+1);
       var newW = maxX-minX+1, newH = maxY-minY+1;
       
       // UPDATE w,h AFTER bounding box for right/bottom trim
@@ -195,6 +195,8 @@ export default async function handler(req, res) {
       // sharp not available, will use JS crop
     }
 
+    console.log(`Sharp available: ${sharpAvailable}`);
+
     // Load pdfjs-dist
     const buildDir = path.resolve(__dirname, '../node_modules/pdfjs-dist/build');
     let pdfjsPath = path.join(buildDir, 'pdf.min.js');
@@ -253,19 +255,24 @@ export default async function handler(req, res) {
       document.getElementById('s').style.display = 'none';
     });
 
+    // Delay 1 detik agar render sempurna sebelum screenshot
+    await new Promise(r => setTimeout(r, 1000));
+
     var png = await page.screenshot({
       type: 'png',
-      fullPage: true,
+      fullPage: false,
       omitBackground: false
     });
     console.log(`Raw PNG: ${png.length}B`);
 
     // Try sharp trim (if available), otherwise fallback to JS-cropped PNG
+    // Threshold 8: lebih ketat dari 10, gridline abu-abu tipis dianggap putih
     if (sharpAvailable) {
       try {
         const sharpModule = await import('sharp');
+        console.log('Running sharp.trim() with threshold=8...');
         const trimmedPng = await sharpModule.default(png)
-          .trim({ threshold: 10, background: { r: 255, g: 255, b: 255 } })
+          .trim({ threshold: 8, background: { r: 255, g: 255, b: 255 } })
           .png()
           .toBuffer();
         console.log(`Sharp trimmed PNG: ${trimmedPng.length}B (saved ${png.length - trimmedPng.length}B)`);
@@ -273,6 +280,8 @@ export default async function handler(req, res) {
       } catch (sharpErr) {
         console.error('Sharp runtime failed, using JS-cropped PNG:', sharpErr.message);
       }
+    } else {
+      console.log('Sharp not available, relying on JS crop in browser');
     }
 
     return res.status(200)

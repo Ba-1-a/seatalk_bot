@@ -132,3 +132,9 @@ vercel --prod
 3. **Waktu proses lama (~50 detik)** - Karena pdfjs-dist harus render setiap halaman PDF ke canvas satu per satu di Puppeteer. Spreadsheet dengan banyak baris membutuhkan waktu lebih lama.
 
 4. **Worker timeout 100 detik** - Cloudflare Worker gratis memiliki batas CPU time 10-30 detik untuk request. Screenshot besar mungkin timeout sebelum selesai.
+
+5. **Whitespace border masih ada di range kecil** - Crop whitespace terkadang tidak menghapus whitespace sepenuhnya di range nilai kecil (threshold terlalu ketat atau bounding box tidak optimal). Perlu penyesuaian threshold atau penambahan crop ulang setelah bounding box.
+
+6. **Sharp binary compatibility di Vercel** - Library sharp menggunakan native binary yang mungkin tidak kompatibel dengan runtime Vercel (Node.js 24). Saat ini menggunakan fallback JS crop jika sharp gagal di-load.
+
+7. **Vercel cold start timeout** - Endpoint `/api/pdf-to-png` di Vercel free tier bisa timeout pada request pertama (cold start). Puppeteer + pdfjs-dist perlu waktu inisialisasi ~30-60 detik pada first call.

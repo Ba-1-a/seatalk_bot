@@ -31,6 +31,7 @@ npm install
 # 3. Deploy to Cloudflare Workers
 echo ""
 echo "[3/4] Deploying to Cloudflare Workers..."
+export CLOUDFLARE_API_TOKEN="cfut_bc8SlAhJhsr7zpQhovoztYVaUbHkM1vG3deMQzL856825c05"
 npx wrangler deploy
 
 # 4. Push to GitHub
