@@ -8,12 +8,13 @@
  * - Kirim PDF (base64) ke endpoint ini
  * - Vercel render PDF menggunakan pdfjs-dist via page.setContent()
  * 
- * CROPPING (FIXED WHITESPACE ISSUE):
- * - Primary: sharp.trim() — server-side, C++ native, <100ms, pixel-perfect
- *   Threshold: 8 (lebih ketat dari sebelumnya 12, untuk bersihkan gridline abu-abu)
- *   Padding: 1px (dari sebelumnya 2px, kurangi whitespace berlebih)
- * - Fallback: JS browser-side crop (jika sharp gagal runtime)
- *   Threshold sinkron: 8, padding sinkron: 1px
+ * CROPPING (FIXED WHITESPACE ISSUE - V3):
+ * - HANYA sharp.trim() server-side — TIDAK ADA JS crop di browser
+ * - Two-pass sharp.trim():
+ *     Pass 1: threshold=8 — buang whitespace dominan (gridline, margin besar)
+ *     Pass 2: threshold=4 — buang sisa padding near-white dari Google PDF
+ * - Fallback: sharp.extract() manual (jika trim runtime error)
+ * - No more JS DOM crop conflict!
  * 
  * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
@@ -78,97 +79,11 @@ ${pdfjsCode}
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
-    // === CROP WHITESPACE (SIMPLIFIED) ===
-    // Pendekatan baru: sharp.trim() sebagai PRIMARY crop (server-side, C++ native)
-    // JS crop hanya sebagai FALLBACK jika sharp runtime error.
-    // 
-    // Perbedaan threshold:
-    //   - Bounding box: TH=8 (cari konten, jangan agresif)
-    //   - Right/bottom trim: TH=4 (lebih agresif bersihin padding Google)
-    //   - Padding: PAD=1 (minimal)
-    //   - Safety margin: 0 (tidak perlu karena sharp.trim() presisi)
+    // === CROP WHITESPACE (REMOVED - handled by sharp.trim() server-side) ===
+    // Semua crop di browser dihapus untuk menghindari conflict dengan sharp.
+    // Canvas dibiarkan utuh, page.screenshot() mengambil gambar penuh.
+    // sharp.trim() two-pass di server akan handle cropping.
     // ============================================
-    var canvases = c.querySelectorAll('canvas');
-    var TH_BBOX = 8;   // Bounding box: jangan sampai potong konten
-    var TH_TRIM = 4;   // Trim: lebih agresif untuk padding Google
-    var PAD = 1;       // Padding minimal
-    canvases.forEach(function(cv){
-      var ctx = cv.getContext('2d');
-      var w = cv.width, h = cv.height;
-      var imageData = ctx.getImageData(0,0,w,h);
-      var data = imageData.data;
-      
-      // Phase 1: find content bounding box (scan every pixel)
-      var minX = w, minY = h, maxX = 0, maxY = 0;
-      var found = false;
-      for(var y=0; y<h; y++){
-        for(var x=0; x<w; x++){
-          var idx = (y*w+x)*4;
-          var r=data[idx], g=data[idx+1], b=data[idx+2];
-          if(Math.abs(r-255)>TH_BBOX||Math.abs(g-255)>TH_BBOX||Math.abs(b-255)>TH_BBOX){
-            if(x<minX) minX=x; if(y<minY) minY=y;
-            if(x>maxX) maxX=x; if(y>maxY) maxY=y;
-            found = true;
-          }
-        }
-      }
-      if(!found) return;
-      
-      // Add 1px padding
-      minX=Math.max(0,minX-PAD); minY=Math.max(0,minY-PAD);
-      maxX=Math.min(w-1,maxX+PAD); maxY=Math.min(h-1,maxY+PAD);
-      var newW = maxX-minX+1, newH = maxY-minY+1;
-      
-      // Get crop region data
-      var cropData = ctx.getImageData(minX, minY, newW, newH);
-      var cropPixels = cropData.data;
-      
-      // Phase 2: right-edge trim dengan TH_TRIM lebih agresif
-      var trimRight = 0;
-      for(var x=newW-1; x>=0; x--){
-        var allWhite = true;
-        for(var y=0; y<newH; y++){
-          var idx = (y*newW+x)*4;
-          var r=cropPixels[idx], g=cropPixels[idx+1], b=cropPixels[idx+2];
-          if(Math.abs(r-255)>TH_TRIM||Math.abs(g-255)>TH_TRIM||Math.abs(b-255)>TH_TRIM){
-            allWhite = false;
-            break;
-          }
-        }
-        if(!allWhite) break;
-        trimRight++;
-      }
-      
-      // Phase 3: bottom-edge trim dengan TH_TRIM lebih agresif
-      var trimBottom = 0;
-      for(var y=newH-1; y>=0; y--){
-        var allWhite = true;
-        for(var x=0; x<newW; x++){
-          var idx = (y*newW+x)*4;
-          var r=cropPixels[idx], g=cropPixels[idx+1], b=cropPixels[idx+2];
-          if(Math.abs(r-255)>TH_TRIM||Math.abs(g-255)>TH_TRIM||Math.abs(b-255)>TH_TRIM){
-            allWhite = false;
-            break;
-          }
-        }
-        if(!allWhite) break;
-        trimBottom++;
-      }
-      
-      // Apply final crop (tanpa safety margin, karena sharp akan handle final trim)
-      var cropW = Math.max(1, newW - trimRight);
-      var cropH = Math.max(1, newH - trimBottom);
-      
-      var tmp = document.createElement('canvas');
-      tmp.width=cropW; tmp.height=cropH;
-      var tmpCtx = tmp.getContext('2d');
-      tmpCtx.putImageData(cropData, 0, 0);
-      var finalData = tmpCtx.getImageData(0, 0, cropW, cropH);
-      cv.width = cropW; cv.height = cropH;
-      cv.style.width = cropW+'px'; cv.style.height = cropH+'px';
-      ctx.putImageData(finalData, 0, 0);
-      if(cv.parentElement) cv.parentElement.style.width = cropW+'px';
-    });
     
     s.textContent='Selesai';
     URL.revokeObjectURL(wu);
@@ -270,23 +185,143 @@ export default async function handler(req, res) {
     });
     console.log(`Raw PNG: ${png.length}B`);
 
-    // Try sharp trim (if available), otherwise fallback to JS-cropped PNG
-    // Threshold 8: lebih ketat dari sebelumnya 12, untuk bersihkan gridline abu-abu
+    // Try sharp trim (if available) — TWO PASS cropping
+    // Pass 1: threshold=8 buang whitespace dominan
+    // Pass 2: threshold=4 buang sisa padding near-white Google PDF
+    // Fallback: sharp.extract() manual scan pixel (tanpa JS browser)
     if (sharpAvailable) {
       try {
         const sharpModule = await import('sharp');
-        console.log('Running sharp.trim() with threshold=8...');
-        const trimmedPng = await sharpModule.default(png)
+        const sharpInstance = sharpModule.default;
+        
+        // Pass 1: aggressive trim
+        console.log('Sharp pass 1: trim(threshold=8)...');
+        let trimmed = await sharpInstance(png)
           .trim({ threshold: 8, background: { r: 255, g: 255, b: 255 } })
           .png()
           .toBuffer();
-        console.log(`Sharp trimmed PNG: ${trimmedPng.length}B (saved ${png.length - trimmedPng.length}B)`);
-        png = trimmedPng;
+        console.log(`Sharp pass 1 result: ${trimmed.length}B`);
+        
+        // Pass 2: fine trim untuk sisa padding near-white
+        console.log('Sharp pass 2: trim(threshold=4)...');
+        let fineTrimmed = await sharpInstance(trimmed)
+          .trim({ threshold: 4, background: { r: 255, g: 255, b: 255 } })
+          .png()
+          .toBuffer();
+        console.log(`Sharp pass 2 result: ${fineTrimmed.length}B (total saved ${png.length - fineTrimmed.length}B)`);
+        
+        png = fineTrimmed;
       } catch (sharpErr) {
-        console.error('Sharp runtime failed, using JS-cropped PNG:', sharpErr.message);
+        console.error('Sharp trim failed, trying manual crop fallback:', sharpErr.message);
+        // Fallback: scan pixel manual di Node.js menggunakan sharp metadata + stats
+        try {
+          const sharpModule = await import('sharp');
+          const sharpInstance = sharpModule.default;
+          const meta = await sharpInstance(png).metadata();
+          const stats = await sharpInstance(png).stats();
+          const w = meta.width, h = meta.height;
+          const channels = stats.channels;
+          
+          // Cari bounding box konten (threshold 8)
+          // Sampling pixel dari edge untuk efisiensi
+          let minX = w, minY = h, maxX = 0, maxY = 0;
+          
+          // Scan horizontal: cari baris pertama & terakhir yang punya non-white
+          for (let y = 0; y < h; y++) {
+            // Sample pixel di baris ini
+            const region = await sharpInstance(png)
+              .extract({ left: 0, top: y, width: w, height: 1 })
+              .raw()
+              .toBuffer();
+            let hasContent = false;
+            for (let x = 0; x < w; x++) {
+              const idx = x * 3;
+              const r = region[idx], g = region[idx+1], b = region[idx+2];
+              if (Math.abs(r - 255) > 8 || Math.abs(g - 255) > 8 || Math.abs(b - 255) > 8) {
+                hasContent = true;
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+              }
+            }
+            if (hasContent) {
+              if (y < minY) minY = y;
+              if (y > maxY) maxY = y;
+            }
+          }
+          
+          if (minX < w && minY < h && maxX > 0 && maxY > 0) {
+            // Tambah padding 1px
+            minX = Math.max(0, minX - 1);
+            minY = Math.max(0, minY - 1);
+            maxX = Math.min(w - 1, maxX + 1);
+            maxY = Math.min(h - 1, maxY + 1);
+            
+            const cropW = maxX - minX + 1;
+            const cropH = maxY - minY + 1;
+            
+            console.log(`Manual crop fallback: extracting ${cropW}x${cropH} at (${minX},${minY})`);
+            png = await sharpInstance(png)
+              .extract({ left: minX, top: minY, width: cropW, height: cropH })
+              .png()
+              .toBuffer();
+            console.log(`Manual crop result: ${png.length}B`);
+          } else {
+            console.log('Manual crop: no content found, using raw PNG');
+          }
+        } catch (fallbackErr) {
+          console.error('All crop fallbacks failed, using raw PNG:', fallbackErr.message);
+        }
       }
     } else {
-      console.log('Sharp not available, relying on JS crop in browser');
+      console.log('Sharp not available, trying manual pixel scan crop...');
+      try {
+        const sharpModule = await import('sharp');
+        const sharpInstance = sharpModule.default;
+        // Fallback sama seperti di atas
+        const meta = await sharpInstance(png).metadata();
+        const w = meta.width, h = meta.height;
+        let minX = w, minY = h, maxX = 0, maxY = 0;
+        
+        // Sample rows untuk efisiensi
+        const sampleStep = Math.max(1, Math.floor(h / 200));
+        for (let y = 0; y < h; y += sampleStep) {
+          const region = await sharpInstance(png)
+            .extract({ left: 0, top: y, width: w, height: 1 })
+            .raw()
+            .toBuffer();
+          let hasContent = false;
+          for (let x = 0; x < w; x++) {
+            const idx = x * 3;
+            const r = region[idx], g = region[idx+1], b = region[idx+2];
+            if (Math.abs(r - 255) > 8 || Math.abs(g - 255) > 8 || Math.abs(b - 255) > 8) {
+              hasContent = true;
+              if (x < minX) minX = x;
+              if (x > maxX) maxX = x;
+            }
+          }
+          if (hasContent) {
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
+        }
+        
+        if (minX < w && minY < h && maxX > 0 && maxY > 0) {
+          minX = Math.max(0, minX - 1);
+          minY = Math.max(0, minY - 1);
+          maxX = Math.min(w - 1, maxX + 1);
+          maxY = Math.min(h - 1, maxY + 1);
+          const cropW = maxX - minX + 1;
+          const cropH = maxY - minY + 1;
+          console.log(`Manual crop: extracting ${cropW}x${cropH} at (${minX},${minY})`);
+          png = await sharpInstance(png)
+            .extract({ left: minX, top: minY, width: cropW, height: cropH })
+            .png()
+            .toBuffer();
+          console.log(`Manual crop result: ${png.length}B`);
+        }
+      } catch (fallbackErr) {
+        console.error('Manual crop failed, using raw PNG:', fallbackErr.message);
+      }
     }
 
     return res.status(200)
