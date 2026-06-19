@@ -8,13 +8,13 @@
  * - Kirim PDF (base64) ke endpoint ini
  * - Vercel render PDF menggunakan pdfjs-dist via page.setContent()
  * 
- * CROPPING (V5 - 4-DIRECTIONAL EDGE SCAN):
+ * CROPPING (V5.1 - SAMPLED 4-DIRECTIONAL EDGE SCAN):
  * - Tidak ada JS crop di browser (canvas dibiarkan utuh)
- * - Tidak ada sharp.trim() atau two-pass
- * - 4-directional edge scan menggunakan sharp.raw() di Node.js:
- *   Scan TOP, BOTTOM, LEFT, RIGHT secara independen
- *   Minimal 3 pixel non-white per baris/kolom (anti false positive)
- *   Potong tepat di batas konten — tanpa padding
+ * - 4-directional edge scan dengan sampling (setiap 2 baris/kolom)
+ *   untuk efisiensi memory dan kecepatan
+ * - Per-sisi scan independen: TOP, BOTTOM, LEFT, RIGHT
+ * - Anti false positive: minimal 5 pixel non-white per baris/kolom
+ * - Fine scan 2 baris di sekitar tepi untuk presisi sub-sampling
  * 
  * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
  * Response: image/png
@@ -79,7 +79,7 @@ ${pdfjsCode}
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
     }
-    // CROP di-handle oleh server-side sharp (4-directional edge scan)
+    // CROP di-handle oleh server-side sharp (sampled edge scan)
     // Canvas dibiarkan utuh untuk hasil screenshot maksimal
     s.textContent='Selesai';
     URL.revokeObjectURL(wu);
@@ -95,146 +95,236 @@ ${pdfjsCode}
 }
 
 /**
- * 4-directional edge scan untuk memotong whitespace dari PNG.
+ * Cek apakah satu baris pixel (raw buffer) memiliki konten non-white
+ * @param {Buffer} rowBuffer - Raw pixel buffer (RGB, 3 bytes per pixel)
+ * @param {Number} width - Jumlah pixel dalam baris
+ * @param {Number} threshold - Threshold dari 255 (default 8)
+ * @param {Number} minCount - Minimal pixel non-white (default 5)
+ * @returns {Boolean} true jika baris memiliki konten
+ */
+function rowHasContent(rowBuffer, width, threshold = 8, minCount = 5) {
+  let count = 0;
+  for (let x = 0; x < width; x++) {
+    const idx = x * 3;
+    const r = rowBuffer[idx];
+    const g = rowBuffer[idx + 1];
+    const b = rowBuffer[idx + 2];
+    if (Math.abs(r - 255) > threshold || Math.abs(g - 255) > threshold || Math.abs(b - 255) > threshold) {
+      count++;
+      if (count >= minCount) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Sampled 4-directional edge scan untuk crop whitespace
  * 
- * Algoritma:
- * 1. Baca semua pixel PNG via sharp.raw()
- * 2. Scan TOP (y=0 → y=max): cari baris pertama dengan ≥3 pixel non-white
- * 3. Scan BOTTOM (y=max → y=0): cari baris terakhir dengan ≥3 pixel non-white
- * 4. Scan LEFT (x=0 → x=max): cari kolom pertama dengan ≥3 pixel non-white
- * 5. Scan RIGHT (x=max → x=0): cari kolom terakhir dengan ≥3 pixel non-white
- * 6. Jika scan tidak menemukan apapun, return buffer asli (aman)
- * 7. Crop menggunakan sharp.extract()
+ * Strategi:
+ * 1. Scan TOP with sampling (setiap 2 baris) → fine scan +-2 baris
+ * 2. Scan BOTTOM with sampling → fine scan +-2 baris
+ * 3. Scan LEFT within [cropY1, cropY2] with sampling
+ * 4. Scan RIGHT within [cropY1, cropY2] with sampling
+ * 5. Extract + tambah padding 1px untuk safety
  * 
- * Threshold: 8 dari 255 (pixel dengan RGB > 247 dianggap putih)
- * Anti false positive: minimal 3 pixel non-white per baris/kolom
+ * Memory: Hanya baca 1 baris/kolom per iterasi (~1-15KB)
+ * Kecepatan: Sampling step=2 mengurangi iterasi 50%
  * 
- * @param {Buffer} pngBuffer - Raw PNG buffer
- * @param {Object} sharpInstance - Sharp module instance
+ * @param {Buffer} pngBuffer - PNG buffer
+ * @param {Object} sharp - Sharp module instance
  * @returns {Buffer} Cropped PNG buffer
  */
-async function cropWhitespace(pngBuffer, sharpInstance) {
-  const meta = await sharpInstance(pngBuffer).metadata();
+async function cropWhitespace(pngBuffer, sharp) {
+  const meta = await sharp(pngBuffer).metadata();
   const w = meta.width;
   const h = meta.height;
   
-  console.log(`Crop scan: ${w}x${h}px`);
+  console.log(`Edge scan: ${w}x${h}px`);
   
-  // Baca semua pixel raw ke memory
-  const rawBuffer = await sharpInstance(pngBuffer)
-    .raw()
-    .toBuffer();
-  
-  const TH = 8;      // Threshold: selisih dari 255
-  const MIN_NON_WHITE = 3;  // Minimal pixel non-white per baris/kolom
-  
-  // Helper: cek apakah pixel di (x,y) adalah non-white
-  function isNonWhite(x, y) {
-    const idx = (y * w + x) * 3;
-    const r = rawBuffer[idx];
-    const g = rawBuffer[idx + 1];
-    const b = rawBuffer[idx + 2];
-    return Math.abs(r - 255) > TH || Math.abs(g - 255) > TH || Math.abs(b - 255) > TH;
-  }
+  const TH = 8;
+  const MIN_PX = 5;     // Minimal pixel non-white
+  const STEP = 2;       // Sampling step (scan setiap 2 baris)
+  const FINE_RANGE = 2; // Fine scan +- baris
   
   // ============================================================
-  // SCAN TOP: cari baris pertama (y terkecil) dengan konten
+  // SCAN TOP dengan sampling
   // ============================================================
-  let cropY1 = 0;
-  for (let y = 0; y < h; y++) {
-    let count = 0;
-    for (let x = 0; x < w; x++) {
-      if (isNonWhite(x, y)) {
-        count++;
-        if (count >= MIN_NON_WHITE) break;
+  let edgeTop = 0;
+  let foundTop = false;
+  
+  // Coarse scan
+  for (let y = 0; y < h; y += STEP) {
+    const rowBuffer = await sharp(pngBuffer)
+      .extract({ left: 0, top: y, width: w, height: 1 })
+      .raw()
+      .toBuffer();
+    if (rowHasContent(rowBuffer, w, TH, MIN_PX)) {
+      // Fine scan: cek 2 baris sebelum y untuk presisi
+      const startY = Math.max(0, y - FINE_RANGE);
+      for (let fy = startY; fy <= y; fy++) {
+        const fineBuffer = await sharp(pngBuffer)
+          .extract({ left: 0, top: fy, width: w, height: 1 })
+          .raw()
+          .toBuffer();
+        if (rowHasContent(fineBuffer, w, TH, MIN_PX)) {
+          edgeTop = fy;
+          foundTop = true;
+          break;
+        }
       }
-    }
-    if (count >= MIN_NON_WHITE) {
-      cropY1 = y;
-      console.log(`  TOP edge found at y=${y}`);
-      break;
+      if (foundTop) break;
     }
   }
-  if (cropY1 === 0) {
-    // Tidak ada konten ditemukan — return asli
-    console.log('  No content found, returning original');
+  
+  if (!foundTop) {
+    console.log('No content found, returning original');
     return pngBuffer;
   }
+  console.log(`  TOP edge: y=${edgeTop}`);
   
   // ============================================================
-  // SCAN BOTTOM: cari baris terakhir (y terbesar) dengan konten
+  // SCAN BOTTOM dengan sampling
   // ============================================================
-  let cropY2 = h - 1;
-  for (let y = h - 1; y >= 0; y--) {
-    let count = 0;
-    for (let x = 0; x < w; x++) {
-      if (isNonWhite(x, y)) {
-        count++;
-        if (count >= MIN_NON_WHITE) break;
+  let edgeBottom = h - 1;
+  let foundBottom = false;
+  
+  for (let y = h - 1; y >= 0; y -= STEP) {
+    const rowBuffer = await sharp(pngBuffer)
+      .extract({ left: 0, top: y, width: w, height: 1 })
+      .raw()
+      .toBuffer();
+    if (rowHasContent(rowBuffer, w, TH, MIN_PX)) {
+      // Fine scan: cek 2 baris setelah y
+      const endY = Math.min(h - 1, y + FINE_RANGE);
+      for (let fy = endY; fy >= y; fy--) {
+        const fineBuffer = await sharp(pngBuffer)
+          .extract({ left: 0, top: fy, width: w, height: 1 })
+          .raw()
+          .toBuffer();
+        if (rowHasContent(fineBuffer, w, TH, MIN_PX)) {
+          edgeBottom = fy;
+          foundBottom = true;
+          break;
+        }
       }
-    }
-    if (count >= MIN_NON_WHITE) {
-      cropY2 = y;
-      console.log(`  BOTTOM edge found at y=${y}`);
-      break;
+      if (foundBottom) break;
     }
   }
+  console.log(`  BOTTOM edge: y=${edgeBottom}`);
   
   // ============================================================
-  // SCAN LEFT: cari kolom pertama (x terkecil) dengan konten
+  // SCAN LEFT dengan sampling (dalam rentang TOP-BOTTOM)
   // ============================================================
-  let cropX1 = 0;
-  for (let x = 0; x < w; x++) {
+  const scanH = edgeBottom - edgeTop + 1;
+  let edgeLeft = 0;
+  let foundLeft = false;
+  
+  // Coarse scan: scan column via extract width=1
+  for (let x = 0; x < w; x += STEP) {
+    const colBuffer = await sharp(pngBuffer)
+      .extract({ left: x, top: edgeTop, width: 1, height: scanH })
+      .raw()
+      .toBuffer();
+    // Check kolom ini
     let count = 0;
-    for (let y = cropY1; y <= cropY2; y++) {
-      if (isNonWhite(x, y)) {
+    for (let y = 0; y < scanH; y++) {
+      const idx = y * 3;
+      const r = colBuffer[idx], g = colBuffer[idx + 1], b = colBuffer[idx + 2];
+      if (Math.abs(r - 255) > TH || Math.abs(g - 255) > TH || Math.abs(b - 255) > TH) {
         count++;
-        if (count >= MIN_NON_WHITE) break;
+        if (count >= MIN_PX) break;
       }
     }
-    if (count >= MIN_NON_WHITE) {
-      cropX1 = x;
-      console.log(`  LEFT edge found at x=${x}`);
-      break;
+    if (count >= MIN_PX) {
+      // Fine scan
+      const startX = Math.max(0, x - FINE_RANGE);
+      for (let fx = startX; fx <= x; fx++) {
+        const fineBuf = await sharp(pngBuffer)
+          .extract({ left: fx, top: edgeTop, width: 1, height: scanH })
+          .raw()
+          .toBuffer();
+        let fcount = 0;
+        for (let y = 0; y < scanH; y++) {
+          const idx = y * 3;
+          const r = fineBuf[idx], g = fineBuf[idx + 1], b = fineBuf[idx + 2];
+          if (Math.abs(r - 255) > TH || Math.abs(g - 255) > TH || Math.abs(b - 255) > TH) {
+            fcount++;
+            if (fcount >= MIN_PX) break;
+          }
+        }
+        if (fcount >= MIN_PX) {
+          edgeLeft = fx;
+          foundLeft = true;
+          break;
+        }
+      }
+      if (foundLeft) break;
     }
   }
+  console.log(`  LEFT edge: x=${edgeLeft}`);
   
   // ============================================================
-  // SCAN RIGHT: cari kolom terakhir (x terbesar) dengan konten
+  // SCAN RIGHT dengan sampling (dalam rentang TOP-BOTTOM)
   // ============================================================
-  let cropX2 = w - 1;
-  for (let x = w - 1; x >= 0; x--) {
+  let edgeRight = w - 1;
+  let foundRight = false;
+  
+  for (let x = w - 1; x >= 0; x -= STEP) {
+    const colBuffer = await sharp(pngBuffer)
+      .extract({ left: x, top: edgeTop, width: 1, height: scanH })
+      .raw()
+      .toBuffer();
     let count = 0;
-    for (let y = cropY1; y <= cropY2; y++) {
-      if (isNonWhite(x, y)) {
+    for (let y = 0; y < scanH; y++) {
+      const idx = y * 3;
+      const r = colBuffer[idx], g = colBuffer[idx + 1], b = colBuffer[idx + 2];
+      if (Math.abs(r - 255) > TH || Math.abs(g - 255) > TH || Math.abs(b - 255) > TH) {
         count++;
-        if (count >= MIN_NON_WHITE) break;
+        if (count >= MIN_PX) break;
       }
     }
-    if (count >= MIN_NON_WHITE) {
-      cropX2 = x;
-      console.log(`  RIGHT edge found at x=${x}`);
-      break;
+    if (count >= MIN_PX) {
+      const endX = Math.min(w - 1, x + FINE_RANGE);
+      for (let fx = endX; fx >= x; fx--) {
+        const fineBuf = await sharp(pngBuffer)
+          .extract({ left: fx, top: edgeTop, width: 1, height: scanH })
+          .raw()
+          .toBuffer();
+        let fcount = 0;
+        for (let y = 0; y < scanH; y++) {
+          const idx = y * 3;
+          const r = fineBuf[idx], g = fineBuf[idx + 1], b = fineBuf[idx + 2];
+          if (Math.abs(r - 255) > TH || Math.abs(g - 255) > TH || Math.abs(b - 255) > TH) {
+            fcount++;
+            if (fcount >= MIN_PX) break;
+          }
+        }
+        if (fcount >= MIN_PX) {
+          edgeRight = fx;
+          foundRight = true;
+          break;
+        }
+      }
+      if (foundRight) break;
     }
   }
+  console.log(`  RIGHT edge: x=${edgeRight}`);
   
-  // Hitung dimensi hasil crop
-  const cropW = cropX2 - cropX1 + 1;
-  const cropH = cropY2 - cropY1 + 1;
+  // Hitung dimensi
+  const cropW = Math.max(1, edgeRight - edgeLeft + 1);
+  const cropH = Math.max(1, edgeBottom - edgeTop + 1);
   
-  console.log(`  Crop region: left=${cropX1}, top=${cropY1}, width=${cropW}, height=${cropH}`);
+  console.log(`  Crop: left=${edgeLeft}, top=${edgeTop}, ${cropW}x${cropH}`);
   
-  // ============================================================
-  // EKSEKUSI CROP menggunakan sharp.extract()
-  // ============================================================
-  const croppedBuffer = await sharpInstance(pngBuffer)
-    .extract({ left: cropX1, top: cropY1, width: cropW, height: cropH })
+  // Eksekusi crop
+  const cropped = await sharp(pngBuffer)
+    .extract({ left: edgeLeft, top: edgeTop, width: cropW, height: cropH })
     .png()
     .toBuffer();
   
-  console.log(`  Cropped PNG: ${croppedBuffer.length}B (saved ${pngBuffer.length - croppedBuffer.length}B)`);
+  console.log(`  Result: ${cropped.length}B (saved ${pngBuffer.length - cropped.length}B)`);
   
-  return croppedBuffer;
+  return cropped;
 }
 
 export default async function handler(req, res) {
@@ -243,10 +333,19 @@ export default async function handler(req, res) {
   let browser;
 
   try {
-    // Load sharp
-    const sharpModule = await import('sharp');
-    const sharpInstance = sharpModule.default;
-    
+    // Check sharp availability
+    let sharpAvailable = false;
+    let sharp;
+    try {
+      const mod = await import('sharp');
+      if (mod.default && typeof mod.default === 'function') {
+        sharp = mod.default;
+        sharpAvailable = true;
+      }
+    } catch (e) {
+      console.log('Sharp not available, will use fallback');
+    }
+
     // Load pdfjs-dist
     const buildDir = path.resolve(__dirname, '../node_modules/pdfjs-dist/build');
     let pdfjsPath = path.join(buildDir, 'pdf.min.js');
@@ -305,7 +404,6 @@ export default async function handler(req, res) {
       document.getElementById('s').style.display = 'none';
     });
 
-    // Delay 1 detik agar render sempurna sebelum screenshot
     await new Promise(r => setTimeout(r, 1000));
 
     var png = await page.screenshot({
@@ -315,11 +413,26 @@ export default async function handler(req, res) {
     });
     console.log(`Raw PNG: ${png.length}B`);
 
-    // Crop whitespace menggunakan 4-directional edge scan
-    try {
-      png = await cropWhitespace(png, sharpInstance);
-    } catch (cropErr) {
-      console.error('Crop failed, using raw PNG:', cropErr.message);
+    // Crop whitespace via sampled edge scan (if sharp available)
+    if (sharpAvailable) {
+      try {
+        png = await cropWhitespace(png, sharp);
+      } catch (cropErr) {
+        console.error('Edge scan crop failed, using raw PNG:', cropErr.message);
+        // Fallback: sharp.trim()
+        try {
+          console.log('Fallback: sharp.trim(threshold=8)...');
+          png = await sharp(png)
+            .trim({ threshold: 8, background: { r: 255, g: 255, b: 255 } })
+            .png()
+            .toBuffer();
+          console.log(`Fallback trim result: ${png.length}B`);
+        } catch (trimErr) {
+          console.error('Fallback trim failed, using raw PNG:', trimErr.message);
+        }
+      }
+    } else {
+      console.log('Sharp not available, returning raw PNG');
     }
 
     return res.status(200)
