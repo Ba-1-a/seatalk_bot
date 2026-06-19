@@ -340,50 +340,77 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&pagenum=false`;            // No page numbers
     
     // ================================================================
-    // ADAPTIVE PAPER SIZE (V4 - FIXED WHITESPACE + RANGE BESAR AMAN)
+    // ADAPTIVE PAPER SIZE (V6 - RASIO KONTEN + JS CROP)
     // ================================================================
-    // Masalah V3: fith=true diterapkan ke SEMUA range, termasuk range besar
-    // (8+ kolom), menyebabkan konten di-shrink vertikal → whitespace bawah.
+    // Strategi: Pilih paper size berdasarkan rasio konten aktual
+    // (jumlah baris vs kolom dari range), bukan hanya jumlah kolom.
     // 
-    // Solusi V4: Split parameter fith berdasarkan range:
-    //   - Range kecil (1-4 kolom): fith=true → konten pas di kedua sumbu
-    //   - Range besar (5+ kolom): fith=false → konten penuh vertikal (seperti asli)
-    //   - Paper size disesuaikan:
-    //     1-2 kolom → LETTER (8.5"x11") — minimal tapi cukup
-    //     3-4 kolom → EXECUTIVE (7.25"x10.5") — medium
-    //     5+ kolom  → TABLOID (17"x11") — lebar, fith=false
+    // Tujuan: Paper size semirip mungkin dengan rasio konten agar
+    // whitespace dari Google PDF engine minimal. Sisa whitespace
+    // akan di-crop oleh JS browser-side edge scan di Vercel.
+    // 
+    // Rasio konten = jumlah_baris / jumlah_kolom
+    //   - Rasio > 1.2 (lebih tinggi) → portrait
+    //   - Rasio < 0.8 (lebih lebar)  → landscape
+    //   - Di antaranya → square-ish
+    // 
+    // Paper size berdasarkan ukuran konten:
+    //   - 1-2 kolom + sedikit baris → STATEMENT (5.5"x8.5")
+    //   - 1-2 kolom + banyak baris  → LETTER (8.5"x11")
+    //   - 3-4 kolom + sedikit baris → EXECUTIVE (7.25"x10.5")
+    //   - 3-4 kolom + banyak baris  → LETTER
+    //   - 5+ kolom                  → TABLOID (17"x11")
     // ================================================================
     if (rangeIndices) {
       const columnCount = rangeIndices.c2 - rangeIndices.c1;
+      const rowCount = rangeIndices.r2 - rangeIndices.r1;
+      const aspectRatio = rowCount / Math.max(1, columnCount); // baris per kolom
       
-      // Pilih ukuran kertas dan parameter fit
       let paperSize, isPortrait, useFith;
+      
       if (columnCount <= 2) {
-        paperSize = 'LETTER';    // 8.5"x11"
-        isPortrait = true;
-        useFith = true;          // fith untuk range kecil
+        if (rowCount <= 10) {
+          // 1-2 kolom, sedikit baris → STATEMENT (paling kecil)
+          paperSize = 'STATEMENT';
+          isPortrait = true;
+          useFith = true;
+        } else {
+          // 1-2 kolom, banyak baris → LETTER
+          paperSize = 'LETTER';
+          isPortrait = true;
+          useFith = true;
+        }
       } else if (columnCount <= 4) {
-        paperSize = 'EXECUTIVE'; // 7.25"x10.5"
-        isPortrait = true;
-        useFith = true;          // fith untuk range medium-sempit
+        if (rowCount <= 15) {
+          // 3-4 kolom, sedikit baris → EXECUTIVE
+          paperSize = 'EXECUTIVE';
+          isPortrait = true;
+          useFith = true;
+        } else {
+          // 3-4 kolom, banyak baris → LETTER
+          paperSize = 'LETTER';
+          isPortrait = true;
+          useFith = true;
+        }
       } else {
-        paperSize = 'TABLOID';   // 17"x11"
+        // 5+ kolom → TABLOID landscape
+        paperSize = 'TABLOID';
         isPortrait = false;
-        useFith = false;         // NO fith untuk range besar (cegah shrink vertikal)
+        useFith = false;
       }
       
       exportUrl += `&portrait=${isPortrait ? 'true' : 'false'}`;
       exportUrl += `&size=${paperSize}`;
       exportUrl += `&fitw=true`;
       if (useFith) {
-        exportUrl += `&fith=true`;  // Hanya untuk range kecil-sedang
+        exportUrl += `&fith=true`;
       }
       exportUrl += `&top_margin=0`;
       exportUrl += `&bottom_margin=0`;
       exportUrl += `&left_margin=0`;
       exportUrl += `&right_margin=0`;
       
-      googleLog.info('Range export: Adaptive paper V4', { rangeIndices, columnCount, paperSize, isPortrait, useFith });
+      googleLog.info('Range export: Adaptive paper V6', { rangeIndices, columnCount, rowCount, aspectRatio, paperSize, isPortrait, useFith });
     } else {
       // Full sheet export (tanpa range)
       exportUrl += `&portrait=true`;
