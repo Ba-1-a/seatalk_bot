@@ -189,9 +189,33 @@ ${pdfjsCode}
       }
     });
     
+    // ============================================================
+    // RESIZE CONTAINER & BODY KE UKURAN KONTEN
+    // ============================================================
+    // Setelah semua canvas di-crop, kita resize container (#c),
+    // body, dan html ke total dimensi konten.
+    // Ini penting agar page.screenshot() tidak menangkap
+    // whitespace dari container yang lebih besar dari konten.
+    // ============================================================
+    var totalW = 0, totalH = 0;
+    canvases.forEach(function(cv){
+      if (totalW < cv.width) totalW = cv.width;
+      totalH += cv.height;
+    });
+    
+    c.style.width = totalW + 'px';
+    c.style.height = totalH + 'px';
+    document.body.style.width = totalW + 'px';
+    document.body.style.height = totalH + 'px';
+    document.documentElement.style.width = totalW + 'px';
+    document.documentElement.style.height = totalH + 'px';
+    
     s.textContent='Selesai';
     URL.revokeObjectURL(wu);
     document.body.dataset.ready='true';
+    // Simpan ukuran konten di dataset untuk dibaca oleh Node.js
+    document.body.dataset.contentWidth = totalW;
+    document.body.dataset.contentHeight = totalH;
   }).catch(function(e){
     document.getElementById('s').textContent='Error: '+e.message;
     document.body.dataset.error=e.message;
@@ -267,6 +291,26 @@ export default async function handler(req, res) {
     });
 
     await new Promise(r => setTimeout(r, 1000));
+
+    // Set viewport ke ukuran konten yang sudah di-crop
+    // agar screenshot presisi tanpa whitespace
+    const contentWidth = await page.evaluate(() => {
+      return parseInt(document.body.dataset.contentWidth) || 0;
+    });
+    const contentHeight = await page.evaluate(() => {
+      return parseInt(document.body.dataset.contentHeight) || 0;
+    });
+    
+    if (contentWidth > 0 && contentHeight > 0) {
+      console.log(`Content size: ${contentWidth}x${contentHeight}`);
+      await page.setViewport({
+        width: contentWidth,
+        height: contentHeight,
+        deviceScaleFactor: 2
+      });
+      // Delay agar viewport resize生效
+      await new Promise(r => setTimeout(r, 500));
+    }
 
     var png = await page.screenshot({
       type: 'png',
