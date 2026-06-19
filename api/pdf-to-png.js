@@ -80,9 +80,9 @@ ${pdfjsCode}
     // 1. Bounding box konten (scan every pixel)
     // 2. Right trim: hapus kolom jika 100% putih
     // 3. Bottom trim: hapus baris jika 100% putih (BARU!)
-    // Threshold: 8 dari 255 (lebih ketat, gridline abu-abu tipis dianggap putih)
+    // Threshold: 12 dari 255 (gridline abu-abu dianggap putih)
     var canvases = c.querySelectorAll('canvas');
-    var TH = 8;
+    var TH = 12;
     canvases.forEach(function(cv){
       var ctx = cv.getContext('2d');
       var w = cv.width, h = cv.height;
@@ -105,9 +105,9 @@ ${pdfjsCode}
       }
       if(!found) return;
       
-      // Add 1px padding (reduce from 2px to avoid extra whitespace)
-      minX=Math.max(0,minX-1); minY=Math.max(0,minY-1);
-      maxX=Math.min(w-1,maxX+1); maxY=Math.min(h-1,maxY+1);
+      // Add 2px padding
+      minX=Math.max(0,minX-2); minY=Math.max(0,minY-2);
+      maxX=Math.min(w-1,maxX+2); maxY=Math.min(h-1,maxY+2);
       var newW = maxX-minX+1, newH = maxY-minY+1;
       
       // UPDATE w,h AFTER bounding box for right/bottom trim
@@ -260,19 +260,19 @@ export default async function handler(req, res) {
 
     var png = await page.screenshot({
       type: 'png',
-      fullPage: false,
+      fullPage: true,
       omitBackground: false
     });
     console.log(`Raw PNG: ${png.length}B`);
 
     // Try sharp trim (if available), otherwise fallback to JS-cropped PNG
-    // Threshold 8: lebih ketat dari 10, gridline abu-abu tipis dianggap putih
+    // Threshold 12: balance между whitespace removal dan content preservation
     if (sharpAvailable) {
       try {
         const sharpModule = await import('sharp');
-        console.log('Running sharp.trim() with threshold=8...');
+        console.log('Running sharp.trim() with threshold=12...');
         const trimmedPng = await sharpModule.default(png)
-          .trim({ threshold: 8, background: { r: 255, g: 255, b: 255 } })
+          .trim({ threshold: 12, background: { r: 255, g: 255, b: 255 } })
           .png()
           .toBuffer();
         console.log(`Sharp trimmed PNG: ${trimmedPng.length}B (saved ${png.length - trimmedPng.length}B)`);
