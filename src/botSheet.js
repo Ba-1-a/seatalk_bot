@@ -521,8 +521,8 @@ async function getSheetsList(env, spreadsheetId) {
 // ============================================================
 
 /**
- * Kirim PDF ke Vercel untuk di-convert ke PNG
- * Vercel akan render PDF native di Chrome (bukan HTML rekonstruksi!)
+ * Kirim PDF ke Vercel API Gateway untuk di-convert ke PNG
+ * Vercel API Gateway meneruskan request ke HF Spaces
  * 
  * @param {ArrayBuffer} pdfBuffer - PDF buffer dari Google Drive export
  * @param {Object} env - Environment variables
@@ -536,7 +536,7 @@ async function convertPdfToPng(pdfBuffer, env) {
         pdfSizeBytes: pdfBuffer.byteLength 
     });
     
-    // Kirim PDF sebagai base64 dalam JSON (lebih reliable dari raw binary)
+    // Kirim PDF sebagai base64 dalam JSON
     const pdfBase64 = arrayBufferToBase64(pdfBuffer);
     
     const response = await fetch(vercelUrl, {

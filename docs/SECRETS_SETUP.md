@@ -10,9 +10,11 @@ Panduan lengkap untuk setup semua secrets yang dibutuhkan oleh VASA Bot.
 | `SEATALK_APP_SECRET` | ✅ Ya | Secret aplikasi SeaTalk Custom App |
 | `GOOGLE_CLIENT_EMAIL` | ✅ Ya | Email Service Account Google |
 | `GOOGLE_PRIVATE_KEY` | ✅ Ya | Private key Service Account Google (format PEM) |
+| `HF_API_KEY` | ✅ Ya | API key untuk akses HF Spaces + Vercel API Gateway |
+| `HF_SPACES_URL` | ✅ Ya | URL HF Spaces deployment (default: `https://ba-1-a-b-cube-tech.hf.space`) |
+| `VERCEL_PDF_TO_PNG_URL` | ❌ Opsional | URL Vercel API Gateway (default: `https://seatalkbot.vercel.app/api/pdf-to-png`) |
 | `SUPABASE_URL` | ❌ Opsional | URL project Supabase |
 | `SUPABASE_SERVICE_ROLE_KEY` | ❌ Opsional | Service role key Supabase |
-| `VERCEL_PDF_TO_PNG_URL` | ❌ Opsional | URL custom Vercel endpoint (default: seatalkbot.vercel.app) |
 
 ---
 
@@ -80,13 +82,30 @@ SUPABASE_SERVICE_ROLE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
 
 ---
 
-### 4. VERCEL_PDF_TO_PNG_URL (Opsional)
+### 4. HF_API_KEY & HF_SPACES_URL (Wajib untuk migrasi HF Spaces)
+
+**HF_API_KEY:**
+- Nilai sama dipakai di: Cloudflare Workers, Vercel, dan HF Spaces
+- Contoh: `adf66d648188c72c3173b698948a128f4b8f7a13b32014bff9ee914b43a6007a`
+
+**HF_SPACES_URL:**
+- URL deployment HF Spaces (setelah deploy HF Spaces)
+- Contoh: `https://ba-1-a-b-cube-tech.hf.space`
+- Port HF Spaces standard: `7860`
+
+Setup di HF Spaces:
+1. Buka HF Spaces → Settings → Variables and secrets
+2. Add `HF_API_KEY` dengan value yang sama
+3. Save
+
+### 5. VERCEL_PDF_TO_PNG_URL (Opsional)
 
 Default URL sudah di-set di kode:
 ```
 https://seatalkbot.vercel.app/api/pdf-to-png
 ```
 
+Sekarang URL ini menuju ke Vercel API Gateway yang meneruskan request ke HF Spaces.
 Hanya perlu diubah jika Anda deploy Vercel dengan custom domain.
 
 ---
@@ -111,7 +130,11 @@ npx wrangler secret put GOOGLE_PRIVATE_KEY
 echo "https://gsdtravhmqbzkwdujkve.supabase.co" | npx wrangler secret put SUPABASE_URL
 echo "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..." | npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 
-# Vercel (opsional)
+# HF Spaces (wajib)
+echo "adf66d648188c72c3173b698948a128f4b8f7a13b32014bff9ee914b43a6007a" | npx wrangler secret put HF_API_KEY
+echo "https://ba-1-a-b-cube-tech.hf.space" | npx wrangler secret put HF_SPACES_URL
+
+# Vercel (opsional, default sudah di-set)
 echo "https://seatalkbot.vercel.app/api/pdf-to-png" | npx wrangler secret put VERCEL_PDF_TO_PNG_URL
 ```
 
@@ -125,6 +148,8 @@ GOOGLE_CLIENT_EMAIL=vasa-725@studio-1196053014-a94d0.iam.gserviceaccount.com
 GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nMIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQDTLteN85kD+s3m\n...\n-----END PRIVATE KEY-----\n"
 SUPABASE_URL=https://gsdtravhmqbzkwdujkve.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+HF_API_KEY=adf66d648188c72c3173b698948a128f4b8f7a13b32014bff9ee914b43a6007a
+HF_SPACES_URL=https://ba-1-a-b-cube-tech.hf.space
 VERCEL_PDF_TO_PNG_URL=https://seatalkbot.vercel.app/api/pdf-to-png
 ```
 
@@ -150,6 +175,8 @@ SEATALK_APP_ID
 SEATALK_APP_SECRET
 GOOGLE_CLIENT_EMAIL
 GOOGLE_PRIVATE_KEY
+HF_API_KEY
+HF_SPACES_URL
 SUPABASE_URL (jika di-set)
 SUPABASE_SERVICE_ROLE_KEY (jika di-set)
 VERCEL_PDF_TO_PNG_URL (jika di-set)
@@ -219,6 +246,8 @@ npx wrangler secret put GOOGLE_PRIVATE_KEY
 echo "https://gsdtravhmqbzkwdujkve.supabase.co" | npx wrangler secret put SUPABASE_URL
 echo "PASTE_SUPABASE_SERVICE_ROLE_KEY" | npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
 
+echo "https://ba-1-a-b-cube-tech.hf.space" | npx wrangler secret put HF_SPACES_URL
+echo "adf66d648188c72c3173b698948a128f4b8f7a13b32014bff9ee914b43a6007a" | npx wrangler secret put HF_API_KEY
 echo "https://seatalkbot.vercel.app/api/pdf-to-png" | npx wrangler secret put VERCEL_PDF_TO_PNG_URL
 
 echo "Setup complete! Verify with: npx wrangler secret list"

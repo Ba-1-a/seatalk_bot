@@ -1,333 +1,96 @@
 /**
  * api/pdf-to-png.js
  * VASA - Virtual Assistant SOC Arjawinangun
- * Vercel endpoint untuk convert PDF ke PNG.
- * 
- * ARSITEKTUR:
- * - Cloudflare Worker export spreadsheet ke PDF via Google Drive API
- * - Kirim PDF (base64) ke endpoint ini
- * - Vercel render PDF menggunakan pdfjs-dist via page.setContent()
- * 
- * CROPPING (V6 - JS BROWSER-SIDE 4-DIRECTIONAL EDGE SCAN):
- * - Sharp tidak tersedia di Vercel serverless, jadi crop dilakukan
- *   di dalam Chromium browser sebelum page.screenshot()
- * - 4-directional edge scan: TOP, BOTTOM, LEFT, RIGHT
- * - Threshold: 8, anti false positive: 3 pixel
- * - Setelah semua canvas di-crop, canvas container di-resize
- *   agar page.screenshot() menghasilkan gambar presisi
- * 
- * Request: POST JSON { pdf_base64: "<base64 encoded pdf>" }
- * Response: image/png
+ * Vercel lightweight proxy — forward PDF ke HF Spaces, return PNG
+ *
+ * ARSITEKTUR BARU (Microservices):
+ * - Vercel: entry point ringan, hanya routing
+ * - HF Spaces: heavy lifting (Puppeteer/Chromium/pdfjs-dist)
+ * - HF Spaces bisa dipanggil oleh project Vercel LAIN juga (general purpose)
+ *
+ * Request:  POST JSON { pdf_base64: "<base64 encoded pdf>" }
+ * Response: image/png (dari HF Spaces)
+ *
+ * Environment Variables:
+ * - HF_SPACES_URL (optional, default: https://ba-1-a-b-cube-tech.hf.space)
+ * - HF_API_KEY (required, untuk autentikasi ke HF Spaces)
  */
-
-import puppeteer from 'puppeteer-core';
-import chromium from '@sparticuz/chromium';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
 export const config = {
   runtime: 'nodejs'
 };
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-function buildHtmlViewer(pdfBase64, pdfjsCode, workerCode) {
-  return `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-*{margin:0;padding:0;box-sizing:border-box}
-html,body{background:#fff;font-family:sans-serif;display:flex;align-items:flex-start;justify-content:flex-start}
-#c{display:flex;flex-direction:column;align-items:flex-start;gap:0}
-.pw{display:inline-block;line-height:0}
-.pw canvas{display:block;margin:0;padding:0}
-#s{display:none}
-</style>
-</head>
-<body>
-<div id="s">Loading PDF...</div>
-<div id="c"></div>
-<script>
-${pdfjsCode}
-</script>
-<script>
-(function(){
-  var wb = new Blob([${JSON.stringify(workerCode)}], {type:'application/javascript'});
-  var wu = URL.createObjectURL(wb);
-  pdfjsLib.GlobalWorkerOptions.workerSrc = wu;
-
-  var b64 = ${JSON.stringify(pdfBase64)};
-  var bytes = Uint8Array.from(atob(b64), function(c){return c.charCodeAt(0)});
-
-  pdfjsLib.getDocument({data: bytes}).promise.then(async function(pdf){
-    var c=document.getElementById('c'), s=document.getElementById('s');
-    s.textContent='Rendering '+pdf.numPages+' pages...';
-    for(var i=1;i<=pdf.numPages;i++){
-      s.textContent='Page '+i+'/'+pdf.numPages+'...';
-      var page=await pdf.getPage(i);
-      var vp=page.getViewport({scale:3});
-      var pw=document.createElement('div');
-      pw.className='pw';
-      var cv=document.createElement('canvas');
-      cv.width=vp.width; cv.height=vp.height;
-      cv.style.width=vp.width+'px'; cv.style.height=vp.height+'px';
-      pw.appendChild(cv); c.appendChild(pw);
-      var ctx=cv.getContext('2d');
-      ctx.fillStyle='#FFFFFF';
-      ctx.fillRect(0,0,vp.width,vp.height);
-      await page.render({canvasContext:ctx, viewport:vp}).promise;
-    }
-    
-    // === CROP WHITESPACE (4-DIRECTIONAL EDGE SCAN) ===
-    // Threshold: 8 dari 255 (near-white dianggap putih)
-    // Anti false positive: minimal 3 pixel non-white per baris/kolom
-    // ============================================
-    var canvases = c.querySelectorAll('canvas');
-    var TH = 8;
-    var MIN_PX = 3;
-    
-    canvases.forEach(function(cv){
-      var ctx = cv.getContext('2d');
-      var w = cv.width, h = cv.height;
-      var imageData = ctx.getImageData(0,0,w,h);
-      var data = imageData.data;
-      
-      // Helper: cek pixel non-white
-      function isNonWhite(px, py) {
-        var idx = (py * w + px) * 4;
-        var r = data[idx], g = data[idx+1], b = data[idx+2];
-        return Math.abs(r-255)>TH || Math.abs(g-255)>TH || Math.abs(b-255)>TH;
-      }
-      
-      // SCAN TOP: cari baris pertama (y terkecil) dengan konten
-      var edgeTop = 0;
-      var found = false;
-      for (var y = 0; y < h; y++) {
-        var count = 0;
-        for (var x = 0; x < w; x++) {
-          if (isNonWhite(x, y)) {
-            count++;
-            if (count >= MIN_PX) break;
-          }
-        }
-        if (count >= MIN_PX) {
-          edgeTop = y;
-          found = true;
-          break;
-        }
-      }
-      if (!found) return; // Tidak ada konten, skip
-      
-      // SCAN BOTTOM: cari baris terakhir dengan konten
-      var edgeBottom = h - 1;
-      for (var y = h - 1; y >= 0; y--) {
-        var count = 0;
-        for (var x = 0; x < w; x++) {
-          if (isNonWhite(x, y)) {
-            count++;
-            if (count >= MIN_PX) break;
-          }
-        }
-        if (count >= MIN_PX) {
-          edgeBottom = y;
-          break;
-        }
-      }
-      
-      // SCAN LEFT: cari kolom pertama dengan konten (dalam rentang edgeTop-edgeBottom)
-      var edgeLeft = 0;
-      for (var x = 0; x < w; x++) {
-        var count = 0;
-        for (var y = edgeTop; y <= edgeBottom; y++) {
-          if (isNonWhite(x, y)) {
-            count++;
-            if (count >= MIN_PX) break;
-          }
-        }
-        if (count >= MIN_PX) {
-          edgeLeft = x;
-          break;
-        }
-      }
-      
-      // SCAN RIGHT: cari kolom terakhir dengan konten
-      var edgeRight = w - 1;
-      for (var x = w - 1; x >= 0; x--) {
-        var count = 0;
-        for (var y = edgeTop; y <= edgeBottom; y++) {
-          if (isNonWhite(x, y)) {
-            count++;
-            if (count >= MIN_PX) break;
-          }
-        }
-        if (count >= MIN_PX) {
-          edgeRight = x;
-          break;
-        }
-      }
-      
-      // Hitung dimensi crop
-      var cropW = edgeRight - edgeLeft + 1;
-      var cropH = edgeBottom - edgeTop + 1;
-      if (cropW < 1) cropW = 1;
-      if (cropH < 1) cropH = 1;
-      
-      // Crop canvas
-      var cropData = ctx.getImageData(edgeLeft, edgeTop, cropW, cropH);
-      cv.width = cropW;
-      cv.height = cropH;
-      cv.style.width = cropW + 'px';
-      cv.style.height = cropH + 'px';
-      ctx.putImageData(cropData, 0, 0);
-      
-      // Resize parent container
-      if (cv.parentElement) {
-        cv.parentElement.style.width = cropW + 'px';
-        cv.parentElement.style.height = cropH + 'px';
-      }
-    });
-    
-    // ============================================================
-    // RESIZE CONTAINER & BODY KE UKURAN KONTEN
-    // ============================================================
-    // Setelah semua canvas di-crop, kita resize container (#c),
-    // body, dan html ke total dimensi konten.
-    // Ini penting agar page.screenshot() tidak menangkap
-    // whitespace dari container yang lebih besar dari konten.
-    // ============================================================
-    var totalW = 0, totalH = 0;
-    canvases.forEach(function(cv){
-      if (totalW < cv.width) totalW = cv.width;
-      totalH += cv.height;
-    });
-    
-    c.style.width = totalW + 'px';
-    c.style.height = totalH + 'px';
-    document.body.style.width = totalW + 'px';
-    document.body.style.height = totalH + 'px';
-    document.documentElement.style.width = totalW + 'px';
-    document.documentElement.style.height = totalH + 'px';
-    
-    s.textContent='Selesai';
-    URL.revokeObjectURL(wu);
-    document.body.dataset.ready='true';
-    // Simpan ukuran konten di dataset untuk dibaca oleh Node.js
-    document.body.dataset.contentWidth = totalW;
-    document.body.dataset.contentHeight = totalH;
-  }).catch(function(e){
-    document.getElementById('s').textContent='Error: '+e.message;
-    document.body.dataset.error=e.message;
-  });
-})();
-</script>
-</body>
-</html>`;
-}
-
 export default async function handler(req, res) {
-  if (req.method !== 'POST') return res.status(405).json({ error: 'Use POST.' });
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Use POST.' });
+  }
 
-  let browser;
+  const HF_SPACES_URL = process.env.HF_SPACES_URL || 'https://ba-1-a-b-cube-tech.hf.space';
+  const HF_API_KEY = process.env.HF_API_KEY;
+
+  if (!HF_API_KEY) {
+    console.error('HF_API_KEY not configured');
+    return res.status(500).json({ error: 'HF_API_KEY not configured' });
+  }
+
+  // Extract PDF base64 dari request
+  const ct = req.headers['content-type'] || '';
+  let pdfBase64 = null;
+
+  if (ct.includes('json')) {
+    const body = req.body || {};
+    pdfBase64 = body.pdf_base64;
+    if (!pdfBase64) return res.status(400).json({ error: 'pdf_base64 required' });
+  } else {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    const buf = Buffer.concat(chunks);
+    if (buf.length < 100) return res.status(400).json({ error: 'PDF too small' });
+    pdfBase64 = buf.toString('base64');
+  }
+
+  console.log(`Forwarding PDF (${Math.round(pdfBase64.length * 0.75)} bytes) to HF Spaces`);
 
   try {
-    // Load pdfjs-dist
-    const buildDir = path.resolve(__dirname, '../node_modules/pdfjs-dist/build');
-    let pdfjsPath = path.join(buildDir, 'pdf.min.js');
-    let workerPath = path.join(buildDir, 'pdf.worker.min.js');
-    if (!fs.existsSync(pdfjsPath)) {
-      const legacyDir = path.resolve(__dirname, '../node_modules/pdfjs-dist/legacy/build');
-      pdfjsPath = path.join(legacyDir, 'pdf.min.js');
-      workerPath = path.join(legacyDir, 'pdf.worker.min.js');
-    }
-    console.log(`pdfjs: ${pdfjsPath}`);
-    const pdfjsCode = fs.readFileSync(pdfjsPath, 'utf-8');
-    const workerCode = fs.readFileSync(workerPath, 'utf-8');
-
-    // Get PDF buffer
-    const ct = req.headers['content-type'] || '';
-    let buf = null;
-    if (ct.includes('json')) {
-      const { pdf_base64 } = req.body || {};
-      if (!pdf_base64) return res.status(400).json({ error: 'pdf_base64 required' });
-      buf = Buffer.from(pdf_base64, 'base64');
-    } else {
-      const chunks = [];
-      for await (const c of req) chunks.push(c);
-      buf = Buffer.concat(chunks);
-    }
-    if (!buf || buf.length < 100) return res.status(400).json({ error: 'PDF too small' });
-    const b64 = buf.toString('base64');
-    console.log(`PDF: ${buf.length}B`);
-
-    // Launch browser
-    const exe = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || (await chromium.executablePath());
-    browser = await puppeteer.launch({
-      args: [...chromium.args, '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage'],
-      executablePath: exe,
-      headless: chromium.headless,
-      defaultViewport: { width: 2560, height: 1440, deviceScaleFactor: 2 }
+    const response = await fetch(`${HF_SPACES_URL}/screenshot`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${HF_API_KEY}`
+      },
+      body: JSON.stringify({ pdf_base64: pdfBase64 })
     });
 
-    const page = await browser.newPage();
-    await page.setViewport({ width: 2560, height: 1440, deviceScaleFactor: 2 });
-
-    const html = buildHtmlViewer(b64, pdfjsCode, workerCode);
-    await page.setContent(html, { waitUntil: 'networkidle0', timeout: 30000 });
-
-    console.log('Waiting for PDF render + crop...');
-    try {
-      await page.waitForFunction(() => document.body.dataset.ready === 'true', { timeout: 120000 });
-    } catch (e) {
-      const err = await page.evaluate(() => document.body.dataset.error || null);
-      if (err) throw new Error('PDF render error: ' + err);
-      console.log('Timeout, proceeding...');
-    }
-    await new Promise(r => setTimeout(r, 3000));
-
-    await page.evaluate(() => {
-      document.getElementById('s').style.display = 'none';
-    });
-
-    await new Promise(r => setTimeout(r, 1000));
-
-    // Set viewport ke ukuran konten yang sudah di-crop
-    // agar screenshot presisi tanpa whitespace
-    const contentWidth = await page.evaluate(() => {
-      return parseInt(document.body.dataset.contentWidth) || 0;
-    });
-    const contentHeight = await page.evaluate(() => {
-      return parseInt(document.body.dataset.contentHeight) || 0;
-    });
-    
-    if (contentWidth > 0 && contentHeight > 0) {
-      console.log(`Content size: ${contentWidth}x${contentHeight}`);
-      await page.setViewport({
-        width: contentWidth,
-        height: contentHeight,
-        deviceScaleFactor: 2
+    if (!response.ok) {
+      const errorBody = await response.text();
+      console.error('HF Spaces error:', response.status, errorBody.substring(0, 300));
+      return res.status(response.status).json({
+        error: `HF Spaces error: ${response.status}`,
+        detail: errorBody.substring(0, 500)
       });
-      // Delay agar viewport resize生效
-      await new Promise(r => setTimeout(r, 500));
     }
 
-    var png = await page.screenshot({
-      type: 'png',
-      fullPage: true,
-      omitBackground: false
-    });
-    console.log(`PNG: ${png.length}B`);
+    const pngBuffer = await response.arrayBuffer();
+    console.log(`PNG received from HF Spaces: ${pngBuffer.byteLength} bytes`);
 
-    return res.status(200)
-      .setHeader('Content-Type', 'image/png')
-      .setHeader('Content-Length', png.length)
-      .send(png);
+    // Forward headers dari HF Spaces
+    const execTime = response.headers.get('X-Execution-Time');
+    const pdfSize = response.headers.get('X-PDF-Size');
+    const pngSize = response.headers.get('X-PNG-Size');
+
+    res.setHeader('Content-Type', 'image/png');
+    res.setHeader('Content-Length', pngBuffer.byteLength);
+    if (execTime) res.setHeader('X-Execution-Time', execTime);
+    if (pdfSize) res.setHeader('X-PDF-Size', pdfSize);
+    if (pngSize) res.setHeader('X-PNG-Size', pngSize);
+
+    return res.status(200).send(Buffer.from(pngBuffer));
 
   } catch (err) {
-    console.error('Error:', err);
-    return res.status(500).json({ error: err?.message || 'Failed' });
-  } finally {
-    if (browser) await browser.close().catch(() => {});
+    console.error('HF Spaces proxy error:', err);
+    return res.status(502).json({
+      error: 'Failed to connect to HF Spaces',
+      detail: err.message
+    });
   }
 }
