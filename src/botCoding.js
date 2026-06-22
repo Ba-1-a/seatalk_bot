@@ -83,14 +83,18 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
       // Cek apakah user punya default sheet
       const defaultSheetId = await env.BOT_MEMORY.get(`default_sheet_${targetId}`);
       
-      if (defaultSheetId) {
-        // Ada sheet default, langsung ambil screenshot
+      // Cek apakah ada URL sheet langsung di text (meskipun tidak ada default sheet)
+      const explicitSheetId = extractSpreadsheetId(text);
+      const sheetToUse = defaultSheetId || explicitSheetId;
+      
+      if (sheetToUse) {
+        // Ada sheet (default atau URL langsung), langsung ambil screenshot
         // Format ulang argumen: ambil kata selain kata kunci screenshot
         const cleanedText = text.replace(/^(bisa|tolong|minta|buatkan|ambilkan|coba|kak|bang)?\s*(screenshot|ss|screen.?shot|capture|print.?screen|foto.?sheet|gambar.?sheet|gambar)\s*/i, '/screenshot ').trim();
         
         // Gunakan ctx.waitUntil untuk screenshot (proses lambat, cegah timeout)
         const screenshotText = cleanedText === '/screenshot' || cleanedText === '/screenshot '
-          ? `/screenshot ${defaultSheetId}`
+          ? `/screenshot ${sheetToUse}`
           : cleanedText;
         
         if (ctx && typeof ctx.waitUntil === 'function') {

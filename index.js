@@ -125,7 +125,7 @@ export default {
       //
       // Command cepat (text reply) tetap diproses synchronous.
 
-      const isSlowCommand = incomingText.startsWith("/screenshot");
+      const isSlowCommand = incomingText.includes("/screenshot");
 
       if (isSlowCommand) {
         // ================================================================
@@ -167,7 +167,7 @@ export default {
         } else if (incomingText.startsWith("/readsheet")) {
           reqLog.info('Routing → /readsheet');
           await handleReadSheet(env, targetId, incomingText, isGroup, threadId, messageId);
-        } else if (incomingText.startsWith("/screenshot")) {
+        } else if (incomingText.includes("/screenshot")) {
           // Fallback: jika ada screenshot tapi tidak lewat slow path (misal dari intent detection di botCoding)
           reqLog.info('Routing → /screenshot (fallback)');
           ctx.waitUntil((async () => {

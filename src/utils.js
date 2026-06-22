@@ -190,9 +190,10 @@ export function arrayBufferToBase64(buffer) {
  * @param {String} targetId - ID target
  * @param {Boolean} isGroup - Apakah grup
  * @param {String} threadId - ID thread
+ * @param {String} originalMessageId - ID pesan original (fallback thread)
  * @returns {Object} Response dari SeaTalk API
  */
-export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threadId) {
+export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threadId, originalMessageId) {
   try {
     // Konversi buffer ke base64
     const base64 = arrayBufferToBase64(buffer);
@@ -218,6 +219,8 @@ export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threa
 
     if (isGroup && threadId && threadId !== "") {
       requestBody.thread_id = threadId;
+    } else if (isGroup && originalMessageId) {
+      requestBody.thread_id = originalMessageId;
     }
 
     log.info('Sending image to SeaTalk', { targetId, isGroup });
