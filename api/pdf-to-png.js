@@ -109,6 +109,11 @@ export default async function handler(req, res) {
         pngBuffer = await response.arrayBuffer();
         console.log(`PNG received from HF Spaces (attempt ${attempt + 1}): ${pngBuffer.byteLength} bytes`);
         
+        // Forward headers dari HF Spaces
+        const execTime = response.headers.get('X-Execution-Time');
+        const pdfSize = response.headers.get('X-PDF-Size');
+        const pngSize = response.headers.get('X-PNG-Size');
+        
         // Success! Break dari retry loop
         break;
         
@@ -135,11 +140,6 @@ export default async function handler(req, res) {
     if (!pngBuffer) {
       throw lastError || new Error('Failed to get PNG from HF Spaces after retries');
     }
-
-    // Forward headers dari HF Spaces
-    const execTime = response.headers.get('X-Execution-Time');
-    const pdfSize = response.headers.get('X-PDF-Size');
-    const pngSize = response.headers.get('X-PNG-Size');
 
     res.setHeader('Content-Type', 'image/png');
     res.setHeader('Content-Length', pngBuffer.byteLength);
