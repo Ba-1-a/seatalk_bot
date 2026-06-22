@@ -28,7 +28,11 @@ const MAX_RETRIES = 1;
 const RETRY_DELAY = 2000; // 2 detik delay sebelum retry
 
 export default async function handler(req, res) {
+  const startTime = Date.now();
+  const reqId = crypto.randomUUID().slice(0, 8);
+  
   if (req.method !== 'POST') {
+    console.log(`[${new Date().toISOString()}] [DEBUG] [VERCEL] reqId=${reqId} → ${req.method} ${req.url} (405 Method Not Allowed)`);
     return res.status(405).json({ error: 'Use POST.' });
   }
 
@@ -36,7 +40,7 @@ export default async function handler(req, res) {
   const HF_API_KEY = process.env.HF_API_KEY;
 
   if (!HF_API_KEY) {
-    console.error('HF_API_KEY not configured');
+    console.error(`[${new Date().toISOString()}] [ERROR] [VERCEL] reqId=${reqId} HF_API_KEY not configured`);
     return res.status(500).json({ error: 'HF_API_KEY not configured' });
   }
 
@@ -56,7 +60,7 @@ export default async function handler(req, res) {
     pdfBase64 = buf.toString('base64');
   }
 
-  console.log(`Forwarding PDF (${Math.round(pdfBase64.length * 0.75)} bytes) to HF Spaces`);
+  console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} Forwarding PDF (${Math.round(pdfBase64.length * 0.75)} bytes) to HF Spaces`);
 
   try {
     // ================================================================
@@ -68,7 +72,7 @@ export default async function handler(req, res) {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         if (attempt > 0) {
-          console.log(`Retry attempt ${attempt}/${MAX_RETRIES} after ${RETRY_DELAY}ms delay`);
+          console.log(`[${new Date().toISOString()}] [WARN] [VERCEL] reqId=${reqId} Retry attempt ${attempt}/${MAX_RETRIES} after ${RETRY_DELAY}ms delay`);
           await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
         }
         
@@ -76,7 +80,7 @@ export default async function handler(req, res) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), HF_SPACES_TIMEOUT);
         
-        console.log(`Attempt ${attempt + 1}: Sending PDF to HF Spaces...`);
+        console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} Attempt ${attempt + 1}: Sending PDF to HF Spaces...`);
         const response = await fetch(`${HF_SPACES_URL}/screenshot`, {
           method: 'POST',
           headers: {
@@ -92,7 +96,7 @@ export default async function handler(req, res) {
         
         if (!response.ok) {
           const errorBody = await response.text();
-          console.error(`HF Spaces error (attempt ${attempt + 1}):`, response.status, errorBody.substring(0, 300));
+          console.error(`[${new Date().toISOString()}] [ERROR] [VERCEL] reqId=${reqId} HF Spaces error (attempt ${attempt + 1}):`, response.status, errorBody.substring(0, 300));
           
           // Jika error 5xx, coba retry. Jika 4xx, langsung return error
           if (response.status >= 500 && attempt < MAX_RETRIES) {
@@ -107,7 +111,7 @@ export default async function handler(req, res) {
         }
 
         pngBuffer = await response.arrayBuffer();
-        console.log(`PNG received from HF Spaces (attempt ${attempt + 1}): ${pngBuffer.byteLength} bytes`);
+        console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} PNG received from HF Spaces (attempt ${attempt + 1}): ${pngBuffer.byteLength} bytes`);
         
         // Forward headers dari HF Spaces
         const execTime = response.headers.get('X-Execution-Time');
@@ -138,6 +142,7 @@ export default async function handler(req, res) {
     
     // Jika semua attempt gagal
     if (!pngBuffer) {
+      console.error(`[${new Date().toISOString()}] [ERROR] [VERCEL] reqId=${reqId} All attempts failed`);
       throw lastError || new Error('Failed to get PNG from HF Spaces after retries');
     }
 
@@ -147,10 +152,14 @@ export default async function handler(req, res) {
     if (pdfSize) res.setHeader('X-PDF-Size', pdfSize);
     if (pngSize) res.setHeader('X-PNG-Size', pngSize);
 
+    const totalDuration = Date.now() - startTime;
+    console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} PNG forwarded to client (${pngBuffer.byteLength} bytes) in ${totalDuration}ms`);
+    
     return res.status(200).send(Buffer.from(pngBuffer));
 
   } catch (err) {
-    console.error('HF Spaces proxy error:', err);
+    const totalDuration = Date.now() - startTime;
+    console.error(`[${new Date().toISOString()}] [ERROR] [VERCEL] reqId=${reqId} HF Spaces proxy error after ${totalDuration}ms:`, err);
     
     // Tentukan error message yang user-friendly
     let errorMessage = 'Failed to connect to HF Spaces';

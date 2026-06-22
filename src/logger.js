@@ -296,6 +296,35 @@ export function createLogger(service, defaultContext = {}) {
       const level = responseCode === 0 ? LOG_LEVELS.DEBUG : LOG_LEVELS.WARN;
       _log(level, service, `API Response: ${api} (code=${responseCode})`, null, { ...defaultContext, ...extra });
     },
+    
+    /**
+     * Log dengan timing (untuk performance tracking)
+     */
+    timing: (msg, duration, extra) => {
+      const level = duration > 5000 ? LOG_LEVELS.WARN : LOG_LEVELS.INFO;
+      _log(level, service, `${msg} (${duration}ms)`, null, { ...defaultContext, duration, ...extra });
+    },
+    
+    /**
+     * Log decision/state untuk debugging
+     */
+    decision: (msg, data) => {
+      _log(LOG_LEVELS.INFO, service, `DECISION: ${msg}`, data, defaultContext);
+    },
+    
+    /**
+     * Log function entry dengan parameters
+     */
+    enter: (funcName, params = {}) => {
+      _log(LOG_LEVELS.DEBUG, service, `→ ${funcName}()`, params, defaultContext);
+    },
+    
+    /**
+     * Log function exit dengan result
+     */
+    exit: (funcName, result = null) => {
+      _log(LOG_LEVELS.DEBUG, service, `← ${funcName}()`, result, defaultContext);
+    },
   };
 }
 

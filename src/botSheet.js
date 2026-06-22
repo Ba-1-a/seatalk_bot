@@ -791,12 +791,20 @@ function parseScreenshotArguments(tokens) {
  * - Custom range diproses dan diteruskan ke Google Drive API export
  */
 export async function handleScreenshotCommand(env, targetId, text, isGroup, threadId, originalMessageId) {
+    const startTime = Date.now();
+    const reqId = crypto.randomUUID().slice(0, 8);
+    const log = googleLog.child({ reqId, targetId, isGroup });
+    
+    log.enter('handleScreenshotCommand', { text: text.substring(0, 50) });
+    
     const args = text.replace(/^\S+\s*/, "").trim();
     const tokens = args.split(/\s+/).filter(Boolean);
     
     // Cek rate limit SEBELUM kirim processing message
+    log.decision('Checking rate limit');
     const rateLimitResult = await checkScreenshotRateLimit(env, targetId);
     if (!rateLimitResult.allowed) {
+        log.warn('Rate limit exceeded', { targetId });
         return await replyToUser(env, rateLimitResult.message, targetId, isGroup, threadId, originalMessageId);
     }
     
@@ -815,10 +823,12 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
     }
     
     // Cari sheet ID dari URL atau dari memory
+    log.decision('Looking for sheet ID');
     const explicitSheetId = extractSpreadsheetId(args) || (tokens[0] && extractSpreadsheetId(tokens[0]));
     const sheetId = explicitSheetId || await env.BOT_MEMORY.get(`default_sheet_${targetId}`);
     
     if (!sheetId) {
+        log.warn('Sheet not found');
         await clearScreenshotRateLimit(env, targetId);
         return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, currentThreadId, originalMessageId);
     }
@@ -828,9 +838,10 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         : tokens;
     const { tabName, customRange } = parseScreenshotArguments(tokensForTabAndRange);
     
-    googleLog.info('Screenshot command received', { sheetId, tabName, customRange });
+    log.info('Screenshot command received', { sheetId, tabName, customRange });
     
     try {
+        log.enter('STEP 1: Get sheets list');
         // STEP 1: Dapatkan daftar sheets dan cari GID target
         let sheetGid = null;
         const sheetsList = await getSheetsList(env, sheetId);
@@ -841,7 +852,7 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
             );
             if (foundSheet) {
                 sheetGid = foundSheet.gid;
-                googleLog.info('Screenshot: Target sheet found', { title: foundSheet.title, gid: foundSheet.gid });
+                log.info('Target sheet found', { title: foundSheet.title, gid: foundSheet.gid });
             }
         }
         
@@ -862,17 +873,21 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
             }
         }
         
+        log.enter('STEP 2: Export to PDF');
         // STEP 2: Export spreadsheet ke PDF via Google Drive API (GRATIS!)
         // Dengan custom range jika ada
-        googleLog.info('Screenshot: Exporting spreadsheet to PDF via Google Drive API');
+        log.decision('Exporting to PDF via Google Drive API', { rangeIndices });
+        const pdfStartTime = Date.now();
         const pdfBuffer = await exportSpreadsheetToPdf(env, sheetId, sheetGid, rangeIndices);
-        googleLog.info('Screenshot: PDF exported', { sizeBytes: pdfBuffer.byteLength, rangeApplied: !!rangeIndices });
-
+        log.timing('PDF export', Date.now() - pdfStartTime, { sizeBytes: pdfBuffer.byteLength });
+        
+        log.enter('STEP 3: Convert PDF to PNG');
         // STEP 3: Kirim PDF ke Vercel untuk di-convert ke PNG
         // Vercel render PDF native di Chrome (BUKAN HTML buatan!)
-        vercelLog.info('Screenshot: Sending PDF to Vercel for conversion');
+        log.decision('Sending PDF to Vercel', { pdfSize: pdfBuffer.byteLength });
+        const vercelStartTime = Date.now();
         const pngBuffer = await convertPdfToPng(pdfBuffer, env);
-        vercelLog.info('Screenshot: PNG received from Vercel', { sizeBytes: pngBuffer.byteLength });
+        log.timing('Vercel PDF-to-PNG', Date.now() - vercelStartTime, { pngSize: pngBuffer.byteLength });
         
         // STEP 4: Upload dan kirim PNG ke SeaTalk
         // Gunakan currentThreadId (bukan threadId asli) agar screenshot masuk di thread yang benar
@@ -888,9 +903,10 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         }
         
     } catch (err) {
-        googleLog.error('Screenshot command failed', err);
+        log.error('Screenshot command failed', err);
         await replyToUser(env, `❌ Gagal membuat screenshot: ${err.message}`, targetId, isGroup, threadId, originalMessageId);
     } finally {
+        log.timing('Total screenshot', Date.now() - startTime);
         // Bersihkan rate limit flag setelah selesai (baik success maupun error)
         await clearScreenshotRateLimit(env, targetId);
     }
