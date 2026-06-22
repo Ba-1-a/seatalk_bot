@@ -68,6 +68,8 @@ export default async function handler(req, res) {
     // ================================================================
     let lastError = null;
     let pngBuffer = null;
+    // Deklarasi di scope luar agar bisa diakses setelah loop (fix: ReferenceError)
+    let execTime, pdfSize, pngSize;
     
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
@@ -100,7 +102,7 @@ export default async function handler(req, res) {
           
           // Jika error 5xx, coba retry. Jika 4xx, langsung return error
           if (response.status >= 500 && attempt < MAX_RETRIES) {
-            lastError = new Error(`HF Spaces error: ${response.status}`);
+            lastError = new Error(`HF Spaces error: ${response.status} - ${errorBody.substring(0, 200)}`);
             continue;
           }
           
@@ -113,17 +115,17 @@ export default async function handler(req, res) {
         pngBuffer = await response.arrayBuffer();
         console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} PNG received from HF Spaces (attempt ${attempt + 1}): ${pngBuffer.byteLength} bytes`);
         
-        // Forward headers dari HF Spaces
-        const execTime = response.headers.get('X-Execution-Time');
-        const pdfSize = response.headers.get('X-PDF-Size');
-        const pngSize = response.headers.get('X-PNG-Size');
+        // Forward headers dari HF Spaces (assign, bukan const - fix: ReferenceError)
+        execTime = response.headers.get('X-Execution-Time');
+        pdfSize = response.headers.get('X-PDF-Size');
+        pngSize = response.headers.get('X-PNG-Size');
         
         // Success! Break dari retry loop
         break;
         
       } catch (err) {
         lastError = err;
-        console.error(`Attempt ${attempt + 1} failed:`, err.message);
+        console.error(`[${new Date().toISOString()}] [ERROR] [VERCEL] reqId=${reqId} Attempt ${attempt + 1} failed: ${err.message}`);
         
         // Jika ini attempt terakhir, throw error
         if (attempt >= MAX_RETRIES) {
