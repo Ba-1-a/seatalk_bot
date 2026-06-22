@@ -92,23 +92,9 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
         // Format ulang argumen: ambil kata selain kata kunci screenshot
         const cleanedText = text.replace(/^(bisa|tolong|minta|buatkan|ambilkan|coba|kak|bang)?\s*(screenshot|ss|screen.?shot|capture|print.?screen|foto.?sheet|gambar.?sheet|gambar)\s*/i, '/screenshot ').trim();
         
-        // Gunakan ctx.waitUntil untuk screenshot (proses lambat, cegah timeout)
-        const screenshotText = cleanedText === '/screenshot' || cleanedText === '/screenshot '
-          ? `/screenshot ${sheetToUse}`
-          : cleanedText;
-        
-        if (ctx && typeof ctx.waitUntil === 'function') {
-          ctx.waitUntil((async () => {
-            try {
-              await handleScreenshotCommand(env, targetId, screenshotText, isGroup, threadId, originalMessageId);
-            } catch (err) {
-              log.error('Background: screenshot intent failed', err);
-            }
-          })());
-        } else {
-          // Fallback: synchronous (tanpa ctx, misal dari Vercel atau test)
-          await handleScreenshotCommand(env, targetId, screenshotText, isGroup, threadId, originalMessageId);
-        }
+        // Screenshot synchronous (tidak pakai ctx.waitUntil karena timeout 15 detik)
+        // Dedup key di index.js sudah handle SeaTalk retry
+        await handleScreenshotCommand(env, targetId, cleanedText, isGroup, threadId, originalMessageId);
         return;
       } else {
         // Tidak ada sheet default, beri tahu user cara set
