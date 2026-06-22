@@ -133,8 +133,15 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
   });
 
   const result = await resp.json();
-  log.apiResponse('replyToUser', result.code || 0, { targetId });
-  return result;
+  log.apiResponse('replyToUser', result.code || 0, { targetId, isGroup, threadId });
+  
+  // Return message_id untuk thread handling
+  // Di group chat, message_id dari response bisa jadi thread_id untuk reply selanjutnya
+  return {
+    ...result,
+    messageId: result.message?.message_id || null,
+    threadId: result.message?.thread_id || null
+  };
 }
 
 /**

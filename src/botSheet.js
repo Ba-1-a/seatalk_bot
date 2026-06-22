@@ -574,6 +574,57 @@ async function convertPdfToPng(pdfBuffer, env) {
 }
 
 // ============================================================
+// RATE LIMITING UNTUK SCREENSHOT
+// ============================================================
+
+/**
+ * Cek rate limit screenshot per user
+ * Mencegah spam: maksimal 2 screenshot concurrent per user
+ * @param {Object} env - Environment variables
+ * @param {String} targetId - ID target (employee_code atau group_id)
+ * @returns {Object} { allowed: boolean, message?: string }
+ */
+async function checkScreenshotRateLimit(env, targetId) {
+  const rateLimitKey = `screenshot_rate_${targetId}`;
+  const processingKey = `screenshot_processing_${targetId}`;
+  
+  try {
+    // Cek apakah ada screenshot yang sedang diproses
+    const processing = await env.BOT_MEMORY.get(processingKey);
+    if (processing) {
+      googleLog.warn('Screenshot rate limit: user has ongoing screenshot', { targetId });
+      return {
+        allowed: false,
+        message: "⏳ Sedang memproses screenshot sebelumnya. Mohon tunggu hingga selesai sebelum request baru."
+      };
+    }
+    
+    // Set flag sedang memproses (TTL 120 detik - cukup untuk proses screenshot)
+    await env.BOT_MEMORY.put(processingKey, '1', { expirationTtl: 120 });
+    
+    return { allowed: true };
+  } catch (err) {
+    googleLog.error('Rate limit check failed', { error: err.message, targetId });
+    // Jika error, tetap allow (fail-open untuk availability)
+    return { allowed: true };
+  }
+}
+
+/**
+ * Hapus flag rate limit setelah screenshot selesai
+ * @param {Object} env - Environment variables
+ * @param {String} targetId - ID target
+ */
+async function clearScreenshotRateLimit(env, targetId) {
+  const processingKey = `screenshot_processing_${targetId}`;
+  try {
+    await env.BOT_MEMORY.delete(processingKey);
+  } catch (err) {
+    googleLog.debug('Failed to clear rate limit', { error: err.message, targetId });
+  }
+}
+
+// ============================================================
 // MAIN SCREENSHOT FUNCTION
 // ============================================================
 
@@ -743,15 +794,33 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
     const args = text.replace(/^\S+\s*/, "").trim();
     const tokens = args.split(/\s+/).filter(Boolean);
     
-    // Kirim pesan "processing" (akan di-skip index.js via dedup jika sudah terkirim)
-    await replyToUser(env, "⏳ Sedang memproses screenshot...", targetId, isGroup, threadId, originalMessageId).catch(() => {});
+    // Cek rate limit SEBELUM kirim processing message
+    const rateLimitResult = await checkScreenshotRateLimit(env, targetId);
+    if (!rateLimitResult.allowed) {
+        return await replyToUser(env, rateLimitResult.message, targetId, isGroup, threadId, originalMessageId);
+    }
+    
+    // Kirim pesan "processing" dan tangkap message_id untuk thread chain
+    let currentThreadId = threadId;
+    if (isGroup) {
+        const processingResp = await replyToUser(env, "⏳ Sedang memproses screenshot...", targetId, isGroup, threadId, originalMessageId);
+        // Gunakan message_id dari response sebagai thread_id untuk reply selanjutnya
+        if (processingResp?.messageId) {
+            currentThreadId = processingResp.messageId;
+            googleLog.info('Screenshot: Created thread for processing', { threadId: currentThreadId });
+        }
+    } else {
+        // Single chat: kirim processing message tanpa menunggu thread
+        await replyToUser(env, "⏳ Sedang memproses screenshot...", targetId, isGroup, threadId, originalMessageId).catch(() => {});
+    }
     
     // Cari sheet ID dari URL atau dari memory
     const explicitSheetId = extractSpreadsheetId(args) || (tokens[0] && extractSpreadsheetId(tokens[0]));
     const sheetId = explicitSheetId || await env.BOT_MEMORY.get(`default_sheet_${targetId}`);
     
     if (!sheetId) {
-        return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, threadId, originalMessageId);
+        await clearScreenshotRateLimit(env, targetId);
+        return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, currentThreadId, originalMessageId);
     }
     
     const tokensForTabAndRange = explicitSheetId
@@ -806,13 +875,24 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         vercelLog.info('Screenshot: PNG received from Vercel', { sizeBytes: pngBuffer.byteLength });
         
         // STEP 4: Upload dan kirim PNG ke SeaTalk
-        await sendScreenshotToUser(env, pngBuffer, targetId, isGroup, threadId);
+        // Gunakan currentThreadId (bukan threadId asli) agar screenshot masuk di thread yang benar
+        await sendScreenshotToUser(env, pngBuffer, targetId, isGroup, currentThreadId);
         
-        await replyToUser(env, "✅ Screenshot berhasil dikirim!", targetId, isGroup, threadId, originalMessageId);
+        // STEP 5: Konfirmasi sukses (jika gagah kirim di thread, fallback ke group chat umum)
+        const confirmResp = await replyToUser(env, "✅ Screenshot berhasil dikirim!", targetId, isGroup, currentThreadId, originalMessageId);
+        
+        // Fallback: jika gagal kirim di thread (misal thread_id tidak valid), kirim ke group umum
+        if (isGroup && confirmResp?.code !== 0 && currentThreadId !== threadId) {
+            googleLog.warn('Screenshot: Failed to send in thread, falling back to group chat', { currentThreadId });
+            await replyToUser(env, "✅ Screenshot berhasil dikirim!", targetId, isGroup, threadId, originalMessageId);
+        }
         
     } catch (err) {
         googleLog.error('Screenshot command failed', err);
         await replyToUser(env, `❌ Gagal membuat screenshot: ${err.message}`, targetId, isGroup, threadId, originalMessageId);
+    } finally {
+        // Bersihkan rate limit flag setelah selesai (baik success maupun error)
+        await clearScreenshotRateLimit(env, targetId);
     }
 }
 
