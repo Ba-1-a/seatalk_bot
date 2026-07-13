@@ -21,9 +21,8 @@ export const config = {
   maxDuration: 60, // 60 detik timeout (cukup untuk HF Spaces processing)
 };
 
-// Timeout untuk request ke HF Spaces (60 detik - beri buffer lebih besar untuk grup/kompleks PDF)
-const HF_SPACES_TIMEOUT = 60000;
-// Retry configuration (2 retries agar transient 500 bisa ditangani)
+// Timeout default untuk request ke HF Spaces; bisa diperkecil/ditambah lewat payload
+const DEFAULT_HF_SPACES_TIMEOUT = 45000;
 const MAX_RETRIES = 2;
 const RETRY_DELAY = 2000; // 2 detik delay sebelum retry
 
@@ -47,10 +46,12 @@ export default async function handler(req, res) {
   // Extract PDF base64 dari request
   const ct = req.headers['content-type'] || '';
   let pdfBase64 = null;
+  let renderOptions = {};
 
   if (ct.includes('json')) {
     const body = req.body || {};
     pdfBase64 = body.pdf_base64;
+    renderOptions = body.render_options || {};
     if (!pdfBase64) return res.status(400).json({ error: 'pdf_base64 required' });
   } else {
     const chunks = [];
@@ -60,7 +61,8 @@ export default async function handler(req, res) {
     pdfBase64 = buf.toString('base64');
   }
 
-  console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} Forwarding PDF (${Math.round(pdfBase64.length * 0.75)} bytes) to HF Spaces`);
+  const timeoutMs = Number(renderOptions.timeout_ms) || DEFAULT_HF_SPACES_TIMEOUT;
+  console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} Forwarding PDF (${Math.round(pdfBase64.length * 0.75)} bytes) to HF Spaces with timeout=${timeoutMs}ms`);
 
   try {
     // ================================================================
@@ -80,7 +82,7 @@ export default async function handler(req, res) {
         
         // Buat AbortController untuk timeout
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), HF_SPACES_TIMEOUT);
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
         
         console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} Attempt ${attempt + 1}: Sending PDF to HF Spaces...`);
         const response = await fetch(`${HF_SPACES_URL}/screenshot`, {
@@ -91,7 +93,10 @@ export default async function handler(req, res) {
             'X-Request-Id': reqId,
             'X-Attempt': String(attempt + 1)
           },
-          body: JSON.stringify({ pdf_base64: pdfBase64 }),
+          body: JSON.stringify({
+            pdf_base64: pdfBase64,
+            render_options: renderOptions
+          }),
           signal: controller.signal
         });
         

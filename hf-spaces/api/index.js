@@ -141,7 +141,8 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
     };
 
     // Validate input
-    const { pdf_base64 } = req.body;
+    const { pdf_base64, render_options } = req.body;
+    const renderOpt = render_options || {};
 
     if (!pdf_base64) {
       return res.status(400).json({
@@ -178,7 +179,13 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
       });
     }
 
-    console.log(`[${new Date().toISOString()}] [HF] reqId=${reqId} Processing PDF: ${pdfBuffer.length} bytes`, attemptMeta);
+    console.log(`[${new Date().toISOString()}] [HF] reqId=${reqId} Processing PDF: ${pdfBuffer.length} bytes`, {
+      ...attemptMeta,
+      renderMode: renderOpt.mode || 'default',
+      scale: renderOpt.scale || 2.2,
+      maxPages: renderOpt.max_pages || 3,
+      timeoutMs: renderOpt.timeout_ms || REQUEST_TIMEOUT
+    });
 
     // Launch browser
     browser = await puppeteer.launch({
@@ -218,7 +225,7 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
       deviceScaleFactor: 2
     });
 
-    const html = buildHtmlViewer(pdfBuffer);
+    const html = buildHtmlViewer(pdfBuffer, renderOpt);
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: REQUEST_TIMEOUT });
 
     await page.waitForFunction(() => document.body.dataset.ready === 'true', {
@@ -288,7 +295,12 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
 // HTML VIEWER BUILDER (sama seperti Vercel)
 // ============================================================
 
-function buildHtmlViewer(pdfBuffer) {
+function buildHtmlViewer(pdfBuffer, renderOptions = {}) {
+  const scale = Number(renderOptions.scale) || 2.2;
+  const maxPages = Number(renderOptions.max_pages) || 3;
+  const timeoutMs = Number(renderOptions.timeout_ms) || REQUEST_TIMEOUT;
+  const renderDelayMs = Number(renderOptions.render_delay_ms) || 800;
+  const deviceScaleFactor = Number(renderOptions.device_scale_factor) || 2;
   const pdfBase64 = pdfBuffer.toString('base64');
 
   // Load pdfjs-dist dari node_modules
@@ -334,11 +346,12 @@ ${pdfjsCode}
 
   pdfjsLib.getDocument({data: bytes}).promise.then(async function(pdf){
     var c=document.getElementById('c'), s=document.getElementById('s');
-    s.textContent='Rendering '+pdf.numPages+' pages...';
-    for(var i=1;i<=pdf.numPages;i++){
-      s.textContent='Page '+i+'/'+pdf.numPages+'...';
+    var pageCount = Math.min(pdf.numPages, ${maxPages});
+    s.textContent='Rendering '+pageCount+' pages...';
+    for(var i=1;i<=pageCount;i++){
+      s.textContent='Page '+i+'/'+pageCount+'...';
       var page=await pdf.getPage(i);
-      var vp=page.getViewport({scale:3});
+      var vp=page.getViewport({scale:${scale}});
       var pw=document.createElement('div');
       pw.className='pw';
       var cv=document.createElement('canvas');
@@ -349,6 +362,7 @@ ${pdfjsCode}
       ctx.fillStyle='#FFFFFF';
       ctx.fillRect(0,0,vp.width,vp.height);
       await page.render({canvasContext:ctx, viewport:vp}).promise;
+      await new Promise(function(resolve){ setTimeout(resolve, ${renderDelayMs}); });
     }
 
     // === CROP WHITESPACE (4-DIRECTIONAL EDGE SCAN) ===

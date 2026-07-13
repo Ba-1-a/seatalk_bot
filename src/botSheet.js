@@ -34,6 +34,7 @@
 import { replyToUser, sendScreenshotToUser, arrayBufferToBase64 } from './utils.js';
 import { importPKCS8, SignJWT } from 'jose';
 import { createLogger, SERVICES } from './logger.js';
+import { resolveRenderOptions } from './renderOptions.js';
 
 const googleLog = createLogger(SERVICES.GOOGLE);
 const vercelLog = createLogger(SERVICES.VERCEL);
@@ -532,12 +533,14 @@ async function convertPdfToPng(pdfBuffer, env) {
     const vercelUrl = env.VERCEL_PDF_TO_PNG_URL || "https://seatalkbot.vercel.app/api/pdf-to-png";
     const pdfBase64 = arrayBufferToBase64(pdfBuffer);
     const maxRetries = 2;
+    const renderOptions = resolveRenderOptions(pdfBuffer.byteLength);
     let attempt = 0;
     let lastError;
 
     vercelLog.info('Sending PDF to Vercel for conversion', {
         url: vercelUrl,
-        pdfSizeBytes: pdfBuffer.byteLength
+        pdfSizeBytes: pdfBuffer.byteLength,
+        renderMode: renderOptions.mode
     });
 
     while (attempt < maxRetries) {
@@ -545,7 +548,17 @@ async function convertPdfToPng(pdfBuffer, env) {
         const response = await fetch(vercelUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pdf_base64: pdfBase64 })
+            body: JSON.stringify({
+                pdf_base64: pdfBase64,
+                render_options: {
+                    mode: renderOptions.mode,
+                    scale: renderOptions.scale,
+                    max_pages: renderOptions.maxPages,
+                    render_delay_ms: renderOptions.renderDelayMs,
+                    timeout_ms: renderOptions.timeoutMs,
+                    device_scale_factor: renderOptions.deviceScaleFactor
+                }
+            })
         });
 
         // Inspect headers first — do not consume body unless needed
@@ -887,6 +900,14 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         await clearScreenshotRateLimit(env, targetId);
         return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, currentThreadId, originalMessageId);
     }
+
+    const targetLabel = isGroup ? 'grup' : 'chat';
+    const processingMessage = isGroup
+        ? `⏳ Memproses screenshot untuk ${targetLabel} ini. Proses bisa memakan waktu beberapa detik.`
+        : '⏳ Sedang memproses screenshot...';
+    if (isGroup) {
+        await replyToUser(env, processingMessage, targetId, isGroup, threadId, originalMessageId).catch(() => {});
+    }
     
     const tokensForTabAndRange = explicitSheetId
         ? tokens.filter(token => !extractSpreadsheetId(token) && !/^url=/i.test(token))
@@ -963,7 +984,10 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         
     } catch (err) {
         log.error('Screenshot command failed', err);
-        await replyToUser(env, `❌ Gagal membuat screenshot: ${err.message}`, targetId, isGroup, threadId, originalMessageId);
+        const friendlyMessage = err?.message?.includes('timeout') || err?.message?.includes('timed out')
+            ? '⏱️ Screenshot memerlukan waktu lebih lama dari biasanya. Coba lagi dengan range yang lebih kecil atau sheet yang lebih ringan.'
+            : `❌ Gagal membuat screenshot: ${err.message}`;
+        await replyToUser(env, friendlyMessage, targetId, isGroup, threadId, originalMessageId);
     } finally {
         log.timing('Total screenshot', Date.now() - startTime);
         // Bersihkan rate limit flag setelah selesai (baik success maupun error)
