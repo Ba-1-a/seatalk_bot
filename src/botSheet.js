@@ -530,47 +530,83 @@ async function getSheetsList(env, spreadsheetId) {
  */
 async function convertPdfToPng(pdfBuffer, env) {
     const vercelUrl = env.VERCEL_PDF_TO_PNG_URL || "https://seatalkbot.vercel.app/api/pdf-to-png";
-    
-    vercelLog.info('Sending PDF to Vercel for conversion', { 
-        url: vercelUrl, 
-        pdfSizeBytes: pdfBuffer.byteLength 
-    });
-    
-    // Kirim PDF sebagai base64 dalam JSON
     const pdfBase64 = arrayBufferToBase64(pdfBuffer);
-    
-    const response = await fetch(vercelUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            pdf_base64: pdfBase64
-        })
+    const maxRetries = 2;
+    let attempt = 0;
+    let lastError;
+
+    vercelLog.info('Sending PDF to Vercel for conversion', {
+        url: vercelUrl,
+        pdfSizeBytes: pdfBuffer.byteLength
     });
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        vercelLog.error('Vercel PDF-to-PNG conversion failed', { 
-            status: response.status, 
-            body: errorText.substring(0, 300) 
+    while (attempt < maxRetries) {
+        attempt += 1;
+        const response = await fetch(vercelUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ pdf_base64: pdfBase64 })
         });
-        throw new Error(`Vercel PDF-to-PNG gagal: HTTP ${response.status}`);
+
+        const responseText = await response.text();
+        const responseBody = responseText.substring(0, 1000);
+
+        if (response.ok) {
+            const contentType = response.headers.get("content-type") || "";
+            if (!contentType.includes("image/png") && !contentType.includes("image")) {
+                vercelLog.error('Vercel returned wrong content type', {
+                    attempt,
+                    contentType,
+                    body: responseBody
+                });
+                throw new Error(`Vercel mengembalikan format salah: ${contentType}`);
+            }
+
+            const pngBuffer = await response.arrayBuffer();
+            vercelLog.info('PNG received from Vercel', {
+                attempt,
+                sizeBytes: pngBuffer.byteLength
+            });
+
+            if (pngBuffer.byteLength < 100) {
+                throw new Error("PNG hasil convert terlalu kecil/rusak.");
+            }
+
+            return pngBuffer;
+        }
+
+        lastError = parseVercelError(response.status, responseBody);
+        vercelLog.error('Vercel PDF-to-PNG conversion failed', {
+            attempt,
+            status: response.status,
+            body: responseBody
+        });
+
+        if (response.status >= 500 && attempt < maxRetries) {
+            vercelLog.warn('Retrying Vercel PDF-to-PNG after server error', {
+                attempt,
+                status: response.status
+            });
+            await new Promise(resolve => setTimeout(resolve, 250));
+            continue;
+        }
+
+        throw new Error(lastError);
     }
 
-    const contentType = response.headers.get("content-type") || "";
-    if (!contentType.includes("image/png") && !contentType.includes("image")) {
-        const text = await response.text();
-        vercelLog.error('Vercel returned wrong content type', { contentType, body: text.substring(0, 300) });
-        throw new Error(`Vercel mengembalikan format salah: ${contentType}`);
+    throw new Error(lastError || 'Vercel PDF-to-PNG gagal');
+}
+
+function parseVercelError(status, body) {
+    try {
+        const json = JSON.parse(body);
+        if (json.error) return `Vercel PDF-to-PNG gagal: HTTP ${status} - ${json.error}`;
+        if (json.message) return `Vercel PDF-to-PNG gagal: HTTP ${status} - ${json.message}`;
+    } catch (parseErr) {
+        // ignore parse error, use raw body
     }
-
-    const pngBuffer = await response.arrayBuffer();
-    vercelLog.info('PNG received from Vercel', { sizeBytes: pngBuffer.byteLength });
-
-    if (pngBuffer.byteLength < 100) {
-        throw new Error("PNG hasil convert terlalu kecil/rusak.");
-    }
-
-    return pngBuffer;
+    const snippet = body.replace(/\s+/g, ' ').trim().slice(0, 200);
+    return `Vercel PDF-to-PNG gagal: HTTP ${status} - ${snippet}`;
 }
 
 // ============================================================
@@ -822,11 +858,22 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         await replyToUser(env, "⏳ Sedang memproses screenshot...", targetId, isGroup, threadId, originalMessageId).catch(() => {});
     }
     
-    // Cari sheet ID dari URL atau dari memory
+    // Cari sheet ID dari URL, lalu dari memory berdasarkan target group/user
     log.decision('Looking for sheet ID');
     const explicitSheetId = extractSpreadsheetId(args) || (tokens[0] && extractSpreadsheetId(tokens[0]));
-    const sheetId = explicitSheetId || await env.BOT_MEMORY.get(`default_sheet_${targetId}`);
+    const storedSheetId = await env.BOT_MEMORY.get(`default_sheet_${targetId}`);
+    const sheetId = explicitSheetId || storedSheetId;
+    const sheetSource = explicitSheetId ? 'explicit' : storedSheetId ? 'memory' : 'missing';
     
+    log.info('Resolved sheetId for screenshot', {
+        targetId,
+        isGroup,
+        sheetId,
+        sheetSource,
+        explicitSheetId: !!explicitSheetId,
+        hasStoredSheet: !!storedSheetId
+    });
+
     if (!sheetId) {
         log.warn('Sheet not found');
         await clearScreenshotRateLimit(env, targetId);
@@ -888,6 +935,10 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         const vercelStartTime = Date.now();
         const pngBuffer = await convertPdfToPng(pdfBuffer, env);
         log.timing('Vercel PDF-to-PNG', Date.now() - vercelStartTime, { pngSize: pngBuffer.byteLength });
+
+        if (!pngBuffer || pngBuffer.byteLength === 0) {
+            throw new Error('Vercel PDF-to-PNG gagal: hasil PNG kosong');
+        }
         
         // STEP 4: Upload dan kirim PNG ke SeaTalk
         // Gunakan currentThreadId (bukan threadId asli) agar screenshot masuk di thread yang benar
