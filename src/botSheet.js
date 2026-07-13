@@ -548,20 +548,24 @@ async function convertPdfToPng(pdfBuffer, env) {
             body: JSON.stringify({ pdf_base64: pdfBase64 })
         });
 
-        const responseText = await response.text();
-        const responseBody = responseText.substring(0, 1000);
+        // Inspect headers first — do not consume body unless needed
+        const contentType = (response.headers.get("content-type") || "").toLowerCase();
 
         if (response.ok) {
-            const contentType = response.headers.get("content-type") || "";
+            // Expect binary image/png (or other image/*). Read as arrayBuffer only.
             if (!contentType.includes("image/png") && !contentType.includes("image")) {
+                // Read body text for debugging (only in this error branch)
+                const errText = await response.text().catch(() => "");
+                const snippet = (errText || "").substring(0, 1000);
                 vercelLog.error('Vercel returned wrong content type', {
                     attempt,
                     contentType,
-                    body: responseBody
+                    body: snippet
                 });
                 throw new Error(`Vercel mengembalikan format salah: ${contentType}`);
             }
 
+            // Valid image response — read binary
             const pngBuffer = await response.arrayBuffer();
             vercelLog.info('PNG received from Vercel', {
                 attempt,
@@ -575,6 +579,9 @@ async function convertPdfToPng(pdfBuffer, env) {
             return pngBuffer;
         }
 
+        // Non-OK responses: read body as text for parsing error details
+        const responseText = await response.text().catch(() => "");
+        const responseBody = responseText.substring(0, 1000);
         lastError = parseVercelError(response.status, responseBody);
         vercelLog.error('Vercel PDF-to-PNG conversion failed', {
             attempt,
@@ -587,7 +594,8 @@ async function convertPdfToPng(pdfBuffer, env) {
                 attempt,
                 status: response.status
             });
-            await new Promise(resolve => setTimeout(resolve, 250));
+            // small backoff
+            await new Promise(resolve => setTimeout(resolve, 250 * attempt));
             continue;
         }
 
