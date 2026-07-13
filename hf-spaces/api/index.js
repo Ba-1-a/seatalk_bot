@@ -27,7 +27,8 @@ const app = express();
 const PORT = process.env.PORT || 7860;
 const API_KEY = process.env.HF_API_KEY || 'your-secret-api-key-here';
 const MAX_PDF_SIZE = 10 * 1024 * 1024; // 10MB
-const REQUEST_TIMEOUT = 30000; // 30 detik
+const REQUEST_TIMEOUT = 60000; // 60 detik
+const BROWSER_CLOSE_TIMEOUT = 10000; // 10 detik
 
 // Rate limiting (in-memory, reset on restart)
 const rateLimitMap = new Map();
@@ -129,13 +130,24 @@ app.get('/stats', requireApiKey, (req, res) => {
  */
 app.post('/screenshot', requireApiKey, async (req, res) => {
   const startTime = Date.now();
+  const reqId = `${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
+  let browser;
 
   try {
+    const attemptMeta = {
+      requestId: reqId,
+      apiKey: req.headers.authorization?.slice(-8) || 'unknown',
+      receivedAt: new Date().toISOString()
+    };
+
     // Validate input
     const { pdf_base64 } = req.body;
 
     if (!pdf_base64) {
-      return res.status(400).json({ error: 'Missing pdf_base64 in request body' });
+      return res.status(400).json({
+        error: 'Missing pdf_base64 in request body',
+        requestId: reqId
+      });
     }
 
     // Decode PDF
@@ -143,7 +155,10 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
     try {
       pdfBuffer = Buffer.from(pdf_base64, 'base64');
     } catch (e) {
-      return res.status(400).json({ error: 'Invalid base64 encoding' });
+      return res.status(400).json({
+        error: 'Invalid base64 encoding',
+        requestId: reqId
+      });
     }
 
     // Validate PDF size
@@ -151,18 +166,22 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
       return res.status(413).json({
         error: 'PDF too large',
         maxSize: MAX_PDF_SIZE,
-        received: pdfBuffer.length
+        received: pdfBuffer.length,
+        requestId: reqId
       });
     }
 
     if (pdfBuffer.length < 100) {
-      return res.status(400).json({ error: 'PDF too small (possibly empty)' });
+      return res.status(400).json({
+        error: 'PDF too small (possibly empty)',
+        requestId: reqId
+      });
     }
 
-    console.log(`[${new Date().toISOString()}] Processing PDF: ${pdfBuffer.length} bytes`);
+    console.log(`[${new Date().toISOString()}] [HF] reqId=${reqId} Processing PDF: ${pdfBuffer.length} bytes`, attemptMeta);
 
     // Launch browser
-    const browser = await puppeteer.launch({
+    browser = await puppeteer.launch({
       headless: 'new',
       args: [
         '--no-sandbox',
@@ -180,32 +199,34 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
         '--mute-audio',
         '--no-first-run',
         '--no-zygote',
-        '--single-process' // Important untuk memory limit
+        '--single-process'
       ]
     });
 
     const page = await browser.newPage();
 
-    // Set viewport (will be adjusted after crop)
+    page.on('console', msg => {
+      console.log(`[${new Date().toISOString()}] [HF] reqId=${reqId} page console:`, msg.text());
+    });
+    page.on('pageerror', err => {
+      console.error(`[${new Date().toISOString()}] [HF] reqId=${reqId} page error:`, err.message);
+    });
+
     await page.setViewport({
       width: 2560,
       height: 1440,
       deviceScaleFactor: 2
     });
 
-    // Build HTML viewer (sama seperti Vercel)
     const html = buildHtmlViewer(pdfBuffer);
     await page.setContent(html, { waitUntil: 'networkidle0', timeout: REQUEST_TIMEOUT });
 
-    // Wait for PDF render + crop
     await page.waitForFunction(() => document.body.dataset.ready === 'true', {
       timeout: REQUEST_TIMEOUT
     });
 
-    // Delay untuk pastikan render selesai
     await new Promise(r => setTimeout(r, 2000));
 
-    // Get content dimensions
     const contentWidth = await page.evaluate(() =>
       parseInt(document.body.dataset.contentWidth) || 0
     );
@@ -213,7 +234,6 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
       parseInt(document.body.dataset.contentHeight) || 0
     );
 
-    // Set viewport ke ukuran konten
     if (contentWidth > 0 && contentHeight > 0) {
       await page.setViewport({
         width: contentWidth,
@@ -223,32 +243,42 @@ app.post('/screenshot', requireApiKey, async (req, res) => {
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // Screenshot
     const png = await page.screenshot({
       type: 'png',
       fullPage: true,
       omitBackground: false
     });
 
-    await browser.close();
-
     const executionTime = Date.now() - startTime;
-    console.log(`[${new Date().toISOString()}] Screenshot done: ${png.length} bytes in ${executionTime}ms`);
+    console.log(`[${new Date().toISOString()}] [HF] reqId=${reqId} Screenshot done: ${png.length} bytes in ${executionTime}ms`, {
+      pdfSize: pdfBuffer.length,
+      pngSize: png.length
+    });
 
-    // Return PNG
     res.set({
       'Content-Type': 'image/png',
       'Content-Length': png.length,
       'X-Execution-Time': executionTime,
       'X-PDF-Size': pdfBuffer.length,
-      'X-PNG-Size': png.length
+      'X-PNG-Size': png.length,
+      'X-Request-Id': reqId
     });
     res.send(png);
 
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] Error:`, err);
+    console.error(`[${new Date().toISOString()}] [HF] reqId=unknown Error:`, err);
+    if (browser) {
+      try {
+        const closePromise = browser.close();
+        const timeoutPromise = new Promise(resolve => setTimeout(resolve, BROWSER_CLOSE_TIMEOUT));
+        await Promise.race([closePromise, timeoutPromise]);
+      } catch (closeErr) {
+        console.error(`[${new Date().toISOString()}] [HF] reqId=unknown Browser close failed:`, closeErr.message);
+      }
+    }
     res.status(500).json({
-      error: err.message,
+      error: err.message || 'Internal server error',
+      requestId: reqId,
       stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
     });
   }

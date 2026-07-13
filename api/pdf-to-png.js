@@ -21,10 +21,10 @@ export const config = {
   maxDuration: 60, // 60 detik timeout (cukup untuk HF Spaces processing)
 };
 
-// Timeout untuk request ke HF Spaces (45 detik - sisanya untuk overhead)
-const HF_SPACES_TIMEOUT = 45000;
-// Retry configuration (1 retry saja, tidak agresif)
-const MAX_RETRIES = 1;
+// Timeout untuk request ke HF Spaces (60 detik - beri buffer lebih besar untuk grup/kompleks PDF)
+const HF_SPACES_TIMEOUT = 60000;
+// Retry configuration (2 retries agar transient 500 bisa ditangani)
+const MAX_RETRIES = 2;
 const RETRY_DELAY = 2000; // 2 detik delay sebelum retry
 
 export default async function handler(req, res) {
@@ -87,7 +87,9 @@ export default async function handler(req, res) {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': `Bearer ${HF_API_KEY}`
+            'Authorization': `Bearer ${HF_API_KEY}`,
+            'X-Request-Id': reqId,
+            'X-Attempt': String(attempt + 1)
           },
           body: JSON.stringify({ pdf_base64: pdfBase64 }),
           signal: controller.signal
@@ -97,30 +99,46 @@ export default async function handler(req, res) {
         clearTimeout(timeoutId);
         
         if (!response.ok) {
-          const errorBody = await response.text();
-          console.error(`[${new Date().toISOString()}] [ERROR] [VERCEL] reqId=${reqId} HF Spaces error (attempt ${attempt + 1}):`, response.status, errorBody.substring(0, 300));
+          const errorText = await response.text().catch(() => '');
+          const errorBody = errorText.substring(0, 500);
+          const errorLog = {
+            status: response.status,
+            attempt: attempt + 1,
+            body: errorBody,
+            headers: {
+              'x-request-id': response.headers.get('x-request-id'),
+              'x-execution-time': response.headers.get('x-execution-time'),
+              'x-pdf-size': response.headers.get('x-pdf-size'),
+              'x-png-size': response.headers.get('x-png-size')
+            }
+          };
+          console.error(`[${new Date().toISOString()}] [ERROR] [VERCEL] reqId=${reqId} HF Spaces error`, errorLog);
           
-          // Jika error 5xx, coba retry. Jika 4xx, langsung return error
           if (response.status >= 500 && attempt < MAX_RETRIES) {
-            lastError = new Error(`HF Spaces error: ${response.status} - ${errorBody.substring(0, 200)}`);
+            lastError = new Error(`HF Spaces error: ${response.status} - ${errorBody}`);
+            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (attempt + 1)));
             continue;
           }
           
           return res.status(response.status).json({
             error: `HF Spaces error: ${response.status}`,
-            detail: errorBody.substring(0, 500)
+            detail: errorBody,
+            requestId: response.headers.get('x-request-id') || reqId
           });
         }
 
         pngBuffer = await response.arrayBuffer();
-        console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} PNG received from HF Spaces (attempt ${attempt + 1}): ${pngBuffer.byteLength} bytes`);
+        console.log(`[${new Date().toISOString()}] [INFO] [VERCEL] reqId=${reqId} PNG received from HF Spaces (attempt ${attempt + 1}): ${pngBuffer.byteLength} bytes`, {
+          'x-request-id': response.headers.get('x-request-id'),
+          'x-execution-time': response.headers.get('x-execution-time'),
+          'x-pdf-size': response.headers.get('x-pdf-size'),
+          'x-png-size': response.headers.get('x-png-size')
+        });
         
-        // Forward headers dari HF Spaces (assign, bukan const - fix: ReferenceError)
         execTime = response.headers.get('X-Execution-Time');
         pdfSize = response.headers.get('X-PDF-Size');
         pngSize = response.headers.get('X-PNG-Size');
         
-        // Success! Break dari retry loop
         break;
         
       } catch (err) {
@@ -174,6 +192,7 @@ export default async function handler(req, res) {
     return res.status(502).json({
       error: errorMessage,
       detail: err.message,
+      requestId: reqId,
       hint: 'Check HF Spaces status at https://ba-1-a-b-cube-tech.hf.space'
     });
   }
