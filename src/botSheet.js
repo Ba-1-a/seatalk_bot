@@ -891,7 +891,7 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         
         // STEP 4: Upload dan kirim PNG ke SeaTalk
         // Gunakan currentThreadId (bukan threadId asli) agar screenshot masuk di thread yang benar
-        await sendScreenshotToUser(env, pngBuffer, targetId, isGroup, currentThreadId);
+        await sendScreenshotToUser(env, pngBuffer, targetId, isGroup, currentThreadId, originalMessageId);
         
         // STEP 5: Konfirmasi sukses (jika gagah kirim di thread, fallback ke group chat umum)
         const confirmResp = await replyToUser(env, "✅ Screenshot berhasil dikirim!", targetId, isGroup, currentThreadId, originalMessageId);

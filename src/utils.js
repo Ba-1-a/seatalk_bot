@@ -113,14 +113,19 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
   let body = isGroup ? { group_id: targetId } : { employee_code: targetId };
   body.message = { tag: "text", text: { content: messageText } };
 
-  log.debug('Reply to user', { targetId, isGroup, textLen: messageText.length });
+  const threadReference = isGroup
+    ? (threadId && threadId !== "" ? threadId : originalMessageId || undefined)
+    : undefined;
 
-  if (isGroup) {
-    if (threadId && threadId !== "") {
-      body.thread_id = threadId;
-    } else if (originalMessageId) {
-      body.thread_id = originalMessageId; 
-    }
+  log.debug('Reply to user', {
+    targetId,
+    isGroup,
+    textLen: messageText.length,
+    threadReference
+  });
+
+  if (threadReference) {
+    body.thread_id = threadReference;
   }
 
   const resp = await fetch(endpoint, {
@@ -133,14 +138,20 @@ export async function replyToUser(env, messageText, targetId, isGroup, threadId,
   });
 
   const result = await resp.json();
-  log.apiResponse('replyToUser', result.code || 0, { targetId, isGroup, threadId });
+  log.apiResponse('replyToUser', result.code || 0, { targetId, isGroup, threadReference });
+
+  const messageId = result.message?.message_id || result.message_id || null;
+  const responseThreadId = result.message?.thread_id || result.thread_id || messageId || null;
+
+  if (result.code && result.code !== 0) {
+    log.error('replyToUser failed', { targetId, isGroup, threadReference, result });
+  }
   
-  // Return message_id untuk thread handling
-  // Di group chat, message_id dari response bisa jadi thread_id untuk reply selanjutnya
+  // Return message_id / thread_id untuk thread handling
   return {
     ...result,
-    messageId: result.message?.message_id || null,
-    threadId: result.message?.thread_id || null
+    messageId,
+    threadId: responseThreadId
   };
 }
 
@@ -217,13 +228,20 @@ export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threa
       }
     };
 
-    if (isGroup && threadId && threadId !== "") {
-      requestBody.thread_id = threadId;
-    } else if (isGroup && originalMessageId) {
-      requestBody.thread_id = originalMessageId;
+    const threadReference = isGroup
+      ? (threadId && threadId !== "" ? threadId : originalMessageId || undefined)
+      : undefined;
+
+    if (threadReference) {
+      requestBody.thread_id = threadReference;
     }
 
-    log.info('Sending image to SeaTalk', { targetId, isGroup });
+    log.info('Sending image to SeaTalk', {
+      targetId,
+      isGroup,
+      threadReference,
+      base64Length: base64.length
+    });
 
     const sendRes = await fetch(endpoint, {
       method: "POST",
@@ -235,12 +253,13 @@ export async function sendScreenshotToUser(env, buffer, targetId, isGroup, threa
     });
 
     const sendData = await sendRes.json();
-    log.apiResponse('sendImage', sendData.code || 0, { targetId });
+    log.apiResponse('sendImage', sendData.code || 0, { targetId, isGroup, threadReference });
 
     if (sendData.code !== 0) {
+      log.error('sendScreenshotToUser failed', { targetId, isGroup, threadReference, sendData });
       throw new Error("Gagal kirim gambar: code=" + sendData.code + " msg=" + sendData.message);
     }
-    log.info('Image sent successfully', { targetId });
+    log.info('Image sent successfully', { targetId, isGroup, threadReference });
 
     return sendData;
 

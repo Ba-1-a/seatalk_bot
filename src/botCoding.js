@@ -174,7 +174,11 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
     if (wordCount > 20 && isGroup) {
       const initResp = await replyToUser(env, "Aku balas di thread ya! 👇", targetId, isGroup, threadId, originalMessageId);
       // Gunakan messageId dari response sebagai thread_id untuk reply selanjutnya
-      const newThreadId = initResp?.messageId || initResp?.message?.message_id || originalMessageId;
+      const newThreadId = initResp?.messageId
+        || initResp?.threadId
+        || initResp?.message?.thread_id
+        || initResp?.message?.message_id
+        || originalMessageId;
       log.info('Auto-threading: Created new thread', { newThreadId, originalMessageId });
       for (const chunk of chunks) await replyToUser(env, chunk, targetId, isGroup, newThreadId, null);
     } else {
