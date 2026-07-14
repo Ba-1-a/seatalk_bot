@@ -604,7 +604,7 @@ async function convertPdfToPng(pdfBuffer, env) {
             return pngBuffer;
         }
 
-        // Non-OK responses: read body as text for parsing error details
+    // Non-OK responses: read body as text for parsing error details
         const responseText = await response.text().catch(() => "");
         const responseBody = responseText.substring(0, 1000);
         lastError = parseVercelError(response.status, responseBody);
@@ -612,7 +612,9 @@ async function convertPdfToPng(pdfBuffer, env) {
         // Add actionable hint based on error
         let userHint = lastError;
         if (response.status === 504) {
-            userHint = `Timeout: PDF (${pdfSizeMB.toFixed(1)}MB) terlalu besar atau HF Spaces sibuk. Coba range yang lebih kecil.`;
+            // 504 = timeout. Cause is almost always HF Spaces overload (concurrent requests),
+            // NOT pdf size. Same PDF works in private chat, so don't blame size.
+            userHint = `⏱️ Layanan render sedang sibuk (antrian penuh). Coba lagi dalam 30-60 detik. Jika masih gagal, gunakan range yang lebih kecil (misal: /screenshot range=A1:D50).`;
         } else if (response.status === 502) {
             userHint = `Layanan HF Spaces gangguan. Coba lagi dalam 1-2 menit atau gunakan range yang lebih kecil.`;
         }
@@ -624,6 +626,12 @@ async function convertPdfToPng(pdfBuffer, env) {
             pdfSizeMB,
             userHint
         });
+
+        // 504 = timeout from overloaded HF Spaces. Retrying ADDS more load and makes
+        // the queue worse. Fail fast instead of retrying.
+        if (response.status === 504) {
+            throw new Error(userHint);
+        }
 
         if (response.status >= 500 && attempt < maxRetries) {
             vercelLog.warn('Retrying Vercel PDF-to-PNG after server error', {
@@ -719,6 +727,56 @@ async function clearScreenshotRateLimit(env, targetId, isGroup, reqId) {
     googleLog.debug('Rate limit cleared', { targetId, isGroup, keyPrefix, reqId });
   } catch (err) {
     googleLog.debug('Failed to clear rate limit', { error: err.message, targetId, isGroup, reqId });
+  }
+}
+
+/**
+ * PER-SHEET CONCURRENCY LOCK
+ * HF Spaces free tier = single instance. Jika banyak user di group chat request
+ * screenshot bersamaan, request akan antri dan timeout (504).
+ * Lock ini mencegah 2 request untuk SHEET YANG SAMA dieksekusi bersamaan.
+ * Request ke-2 akan menunggu (queue) hingga request ke-1 selesai, bukan langsung timeout.
+ *
+ * @param {Object} env - Environment variables
+ * @param {String} sheetId - Spreadsheet ID (lock key)
+ * @param {Number} maxWaitMs - Max waktu tunggu sebelum give up
+ * @returns {Boolean} true jika lock didapat, false jika timeout waiting
+ */
+async function acquireSheetLock(env, sheetId, maxWaitMs = 45000) {
+  const lockKey = `sheet_lock_${sheetId}`;
+  const start = Date.now();
+  const waitStep = 1500;
+
+  while (Date.now() - start < maxWaitMs) {
+    const existing = await env.BOT_MEMORY.get(lockKey);
+    if (!existing) {
+      // Lock bebas, ambil lock dengan TTL 60s (cukup untuk 1 render)
+      await env.BOT_MEMORY.put(lockKey, Date.now().toString(), { expirationTtl: 60 });
+      googleLog.info('Sheet lock acquired', { sheetId });
+      return true;
+    }
+    googleLog.warn('Sheet lock busy, waiting...', {
+      sheetId,
+      waitedMs: Date.now() - start,
+      lockedAt: existing
+    });
+    await new Promise(resolve => setTimeout(resolve, waitStep));
+  }
+
+  googleLog.error('Sheet lock timeout - giving up', { sheetId, maxWaitMs });
+  return false;
+}
+
+/**
+ * Lepas per-sheet lock setelah render selesai (sukses/gagal)
+ */
+async function releaseSheetLock(env, sheetId) {
+  const lockKey = `sheet_lock_${sheetId}`;
+  try {
+    await env.BOT_MEMORY.delete(lockKey);
+    googleLog.debug('Sheet lock released', { sheetId });
+  } catch (err) {
+    googleLog.debug('Failed to release sheet lock', { error: err.message, sheetId });
   }
 }
 
@@ -942,6 +1000,22 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, currentThreadId, originalMessageId);
     }
 
+    // ================================================================
+    // PER-SHEET CONCURRENCY LOCK
+    // HF Spaces free tier = single instance. Di group chat, multiple user
+    // bisa request sheet yg SAMA bersamaan -> request antri & timeout (504).
+    // Lock ini membuat request ke-2 menunggu (queue) hingga ke-1 selesai.
+    // ================================================================
+    log.decision('Acquiring per-sheet lock', { sheetId });
+    const lockAcquired = await acquireSheetLock(env, sheetId, 45000);
+    if (!lockAcquired) {
+        log.warn('Sheet lock timeout - too many concurrent requests', { sheetId });
+        await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
+        return await replyToUser(env,
+            "⏳ Layanan render sedang sangat sibuk. Mohon tunggu 1-2 menit lalu coba lagi.",
+            targetId, isGroup, threadId, originalMessageId);
+    }
+
     const targetLabel = isGroup ? 'grup' : 'chat';
     const processingMessage = isGroup
         ? `⏳ Memproses screenshot untuk ${targetLabel} ini. Proses bisa memakan waktu beberapa detik.`
@@ -1033,6 +1107,8 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         log.timing('Total screenshot', Date.now() - startTime);
         // Bersihkan rate limit flag setelah selesai (baik success maupun error)
         await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
+        // Lepas per-sheet lock agar request berikutnya bisa jalan
+        await releaseSheetLock(env, sheetId);
     }
 }
 
