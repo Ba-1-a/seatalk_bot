@@ -18,13 +18,13 @@
 
 export const config = {
   runtime: 'nodejs',
-  maxDuration: 60, // 60 detik timeout (cukup untuk HF Spaces processing)
+  maxDuration: 90, // 90 detik timeout untuk handle PDF besar yang butuh render lama
 };
 
 // Timeout default untuk request ke HF Spaces; bisa diperkecil/ditambah lewat payload
 const DEFAULT_HF_SPACES_TIMEOUT = 45000;
 const MAX_RETRIES = 2;
-const RETRY_DELAY = 2000; // 2 detik delay sebelum retry
+const RETRY_DELAY_BASE = 2000; // Base delay untuk exponential backoff (2 detik)
 
 export default async function handler(req, res) {
   const startTime = Date.now();
@@ -76,8 +76,10 @@ export default async function handler(req, res) {
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       try {
         if (attempt > 0) {
-          console.log(`[${new Date().toISOString()}] [WARN] [VERCEL] reqId=${reqId} Retry attempt ${attempt}/${MAX_RETRIES} after ${RETRY_DELAY}ms delay`);
-          await new Promise(resolve => setTimeout(resolve, RETRY_DELAY));
+          // Exponential backoff: 2s, 4s, 8s...
+          const backoffDelay = RETRY_DELAY_BASE * Math.pow(2, attempt - 1);
+          console.log(`[${new Date().toISOString()}] [WARN] [VERCEL] reqId=${reqId} Retry attempt ${attempt}/${MAX_RETRIES} after ${backoffDelay}ms delay (exponential backoff)`);
+          await new Promise(resolve => setTimeout(resolve, backoffDelay));
         }
         
         // Buat AbortController untuk timeout
@@ -121,7 +123,9 @@ export default async function handler(req, res) {
           
           if (response.status >= 500 && attempt < MAX_RETRIES) {
             lastError = new Error(`HF Spaces error: ${response.status} - ${errorBody}`);
-            await new Promise(resolve => setTimeout(resolve, RETRY_DELAY * (attempt + 1)));
+            const backoffDelay = RETRY_DELAY_BASE * Math.pow(2, attempt);
+            console.log(`[${new Date().toISOString()}] [WARN] [VERCEL] reqId=${reqId} Server error, will retry in ${backoffDelay}ms`);
+            await new Promise(resolve => setTimeout(resolve, backoffDelay));
             continue;
           }
           
@@ -188,17 +192,27 @@ export default async function handler(req, res) {
     
     // Tentukan error message yang user-friendly
     let errorMessage = 'Failed to connect to HF Spaces';
+    let hint = 'Check HF Spaces status at https://ba-1-a-b-cube-tech.hf.space';
+    
     if (err.name === 'AbortError') {
-      errorMessage = 'HF Spaces processing timeout (>45s)';
+      errorMessage = 'HF Spaces processing timeout';
+      hint = 'Sheet terlalu besar atau HF Spaces sedang sibuk. Coba dengan range yang lebih kecil.';
     } else if (err.message.includes('ECONNREFUSED') || err.message.includes('ENOTFOUND')) {
       errorMessage = 'HF Spaces service unavailable';
+      hint = 'Layanan HF Spaces sedang maintenance. Coba beberapa saat lagi.';
+    } else if (err.message.includes('PDF')) {
+      hint = 'PDF corruption detected. Coba re-export spreadsheet.';
     }
+    
+    const pdfSizeMB = pdfBase64 ? Math.round(pdfBase64.length * 0.75 / 1024 / 1024 * 100) / 100 : 0;
     
     return res.status(502).json({
       error: errorMessage,
       detail: err.message,
       requestId: reqId,
-      hint: 'Check HF Spaces status at https://ba-1-a-b-cube-tech.hf.space'
+      hint: hint,
+      pdfSizeMB: pdfSizeMB,
+      retryable: err.name === 'AbortError' || err.message.includes('fetch')
     });
   }
 }

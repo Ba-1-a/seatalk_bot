@@ -537,9 +537,21 @@ async function convertPdfToPng(pdfBuffer, env) {
     let attempt = 0;
     let lastError;
 
+    // Pre-flight size check
+    const pdfSizeMB = pdfBuffer.byteLength / 1024 / 1024;
+    if (pdfSizeMB > 3.5) {
+        vercelLog.warn('PDF too large for reliable conversion', { pdfSizeMB });
+        throw new Error(`Sheet terlalu besar (${pdfSizeMB.toFixed(1)}MB). Coba gunakan range yang lebih kecil (misal: /screenshot range=A1:D50)`);
+    }
+    
+    if (pdfSizeMB > 2.5) {
+        vercelLog.warn('Large PDF detected, may take longer', { pdfSizeMB });
+    }
+
     vercelLog.info('Sending PDF to Vercel for conversion', {
         url: vercelUrl,
         pdfSizeBytes: pdfBuffer.byteLength,
+        pdfSizeMB: pdfSizeMB.toFixed(2),
         renderMode: renderOptions.mode
     });
 
@@ -596,10 +608,21 @@ async function convertPdfToPng(pdfBuffer, env) {
         const responseText = await response.text().catch(() => "");
         const responseBody = responseText.substring(0, 1000);
         lastError = parseVercelError(response.status, responseBody);
+        
+        // Add actionable hint based on error
+        let userHint = lastError;
+        if (response.status === 504) {
+            userHint = `Timeout: PDF (${pdfSizeMB.toFixed(1)}MB) terlalu besar atau HF Spaces sibuk. Coba range yang lebih kecil.`;
+        } else if (response.status === 502) {
+            userHint = `Layanan HF Spaces gangguan. Coba lagi dalam 1-2 menit atau gunakan range yang lebih kecil.`;
+        }
+        
         vercelLog.error('Vercel PDF-to-PNG conversion failed', {
             attempt,
             status: response.status,
-            body: responseBody
+            body: responseBody,
+            pdfSizeMB,
+            userHint
         });
 
         if (response.status >= 500 && attempt < maxRetries) {
@@ -607,12 +630,13 @@ async function convertPdfToPng(pdfBuffer, env) {
                 attempt,
                 status: response.status
             });
-            // small backoff
-            await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+            // Exponential backoff: 250ms, 500ms
+            const backoffMs = 250 * Math.pow(2, attempt - 1);
+            await new Promise(resolve => setTimeout(resolve, backoffMs));
             continue;
         }
 
-        throw new Error(lastError);
+        throw new Error(userHint);
     }
 
     throw new Error(lastError || 'Vercel PDF-to-PNG gagal');
@@ -635,33 +659,46 @@ function parseVercelError(status, body) {
 // ============================================================
 
 /**
- * Cek rate limit screenshot per user
- * Mencegah spam: maksimal 2 screenshot concurrent per user
+ * Cek rate limit screenshot per user/group dengan chatType awareness
+ * Mencegah spam: maksimal 1 screenshot concurrent per user
  * @param {Object} env - Environment variables
  * @param {String} targetId - ID target (employee_code atau group_id)
+ * @param {Boolean} isGroup - Apakah ini group chat
+ * @param {String} reqId - Request ID untuk logging
  * @returns {Object} { allowed: boolean, message?: string }
  */
-async function checkScreenshotRateLimit(env, targetId) {
-  const rateLimitKey = `screenshot_rate_${targetId}`;
-  const processingKey = `screenshot_processing_${targetId}`;
+async function checkScreenshotRateLimit(env, targetId, isGroup, reqId) {
+  // Separate rate limit keys untuk group vs private chat
+  // Group chats are more likely to have concurrent requests dari multiple users
+  const keyPrefix = isGroup ? 'group' : 'user';
+  const processingKey = `screenshot_processing_${keyPrefix}_${targetId}`;
   
   try {
     // Cek apakah ada screenshot yang sedang diproses
     const processing = await env.BOT_MEMORY.get(processingKey);
     if (processing) {
-      googleLog.warn('Screenshot rate limit: user has ongoing screenshot', { targetId });
+      const chatType = isGroup ? 'group chat ini' : 'anda';
+      googleLog.warn('Screenshot rate limit: ongoing screenshot', { 
+        targetId, 
+        isGroup,
+        chatType,
+        reqId 
+      });
       return {
         allowed: false,
-        message: "⏳ Sedang memproses screenshot sebelumnya. Mohon tunggu hingga selesai sebelum request baru."
+        message: isGroup
+          ? "⏳ Sedang memproses screenshot sebelumnya di group chat ini. Mohon tunggu hingga selesai."
+          : "⏳ Sedang memproses screenshot sebelumnya. Mohon tunggu hingga selesai sebelum request baru."
       };
     }
     
     // Set flag sedang memproses (TTL 120 detik - cukup untuk proses screenshot)
     await env.BOT_MEMORY.put(processingKey, '1', { expirationTtl: 120 });
     
+    googleLog.info('Rate limit check passed', { targetId, isGroup, keyPrefix, reqId });
     return { allowed: true };
   } catch (err) {
-    googleLog.error('Rate limit check failed', { error: err.message, targetId });
+    googleLog.error('Rate limit check failed', { error: err.message, targetId, isGroup, reqId });
     // Jika error, tetap allow (fail-open untuk availability)
     return { allowed: true };
   }
@@ -671,13 +708,17 @@ async function checkScreenshotRateLimit(env, targetId) {
  * Hapus flag rate limit setelah screenshot selesai
  * @param {Object} env - Environment variables
  * @param {String} targetId - ID target
+ * @param {Boolean} isGroup - Apakah ini group chat
+ * @param {String} reqId - Request ID untuk logging
  */
-async function clearScreenshotRateLimit(env, targetId) {
-  const processingKey = `screenshot_processing_${targetId}`;
+async function clearScreenshotRateLimit(env, targetId, isGroup, reqId) {
+  const keyPrefix = isGroup ? 'group' : 'user';
+  const processingKey = `screenshot_processing_${keyPrefix}_${targetId}`;
   try {
     await env.BOT_MEMORY.delete(processingKey);
+    googleLog.debug('Rate limit cleared', { targetId, isGroup, keyPrefix, reqId });
   } catch (err) {
-    googleLog.debug('Failed to clear rate limit', { error: err.message, targetId });
+    googleLog.debug('Failed to clear rate limit', { error: err.message, targetId, isGroup, reqId });
   }
 }
 
@@ -857,11 +898,11 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
     const args = text.replace(/^\S+\s*/, "").trim();
     const tokens = args.split(/\s+/).filter(Boolean);
     
-    // Cek rate limit SEBELUM kirim processing message
+    // Cek rate limit SEBELUM kirim processing message (chat-type aware)
     log.decision('Checking rate limit');
-    const rateLimitResult = await checkScreenshotRateLimit(env, targetId);
+    const rateLimitResult = await checkScreenshotRateLimit(env, targetId, isGroup, reqId);
     if (!rateLimitResult.allowed) {
-        log.warn('Rate limit exceeded', { targetId });
+        log.warn('Rate limit exceeded', { targetId, isGroup });
         return await replyToUser(env, rateLimitResult.message, targetId, isGroup, threadId, originalMessageId);
     }
     
@@ -897,7 +938,7 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
 
     if (!sheetId) {
         log.warn('Sheet not found');
-        await clearScreenshotRateLimit(env, targetId);
+        await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
         return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, currentThreadId, originalMessageId);
     }
 
@@ -991,7 +1032,7 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
     } finally {
         log.timing('Total screenshot', Date.now() - startTime);
         // Bersihkan rate limit flag setelah selesai (baik success maupun error)
-        await clearScreenshotRateLimit(env, targetId);
+        await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
     }
 }
 
