@@ -1047,27 +1047,29 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
             }
         }
         
-        // ================================================================
-        // PERBAIKAN: Parse custom range untuk Google Drive export
-        // ================================================================
-        // User input: "A1:D15" → parseCustomRange → "A1:D15"
-        // → parseA1RangeToIndices → { r1:0, c1:0, r2:15, c2:4 }
-        // → exportSpreadsheetToPdf dengan rangeIndices
-        // ================================================================
-        let rangeIndices = null;
-        if (customRange) {
-            rangeIndices = parseA1RangeToIndices(customRange);
-            if (rangeIndices) {
-                googleLog.info('Screenshot: Custom range will be applied', { customRange, rangeIndices });
-            } else {
-                googleLog.warn('Screenshot: Custom range parsing failed, exporting full sheet', { customRange });
-            }
-        }
-        
-        log.enter('STEP 2: Export to PDF');
-        // STEP 2: Export spreadsheet ke PDF via Google Drive API (GRATIS!)
-        // Dengan custom range jika ada
-        log.decision('Exporting to PDF via Google Drive API', { rangeIndices });
+     // ================================================================
+     // PERBAIKAN: Parse custom range untuk Google Drive export
+     // ================================================================
+     // User input: "A1:D15" → parseCustomRange → "A1:D15"
+     // → parseA1RangeToIndices → { r1:0, c1:0, r2:15, c2:4 }
+     // → exportSpreadsheetToPdf dengan rangeIndices
+     // ================================================================
+     let rangeIndices = null;
+     if (customRange) {
+         rangeIndices = parseA1RangeToIndices(customRange);
+         if (rangeIndices) {
+             googleLog.info('Screenshot: Custom range will be applied', { customRange, rangeIndices });
+         } else {
+             googleLog.warn('Screenshot: Custom range parsing failed, exporting full sheet', { customRange });
+         }
+     } else {
+         googleLog.info('Screenshot: No custom range provided, exporting full sheet');
+     }
+     
+     log.enter('STEP 2: Export to PDF');
+     // STEP 2: Export spreadsheet ke PDF via Google Drive API (GRATIS!)
+     // Dengan custom range jika ada
+     log.decision('Exporting to PDF via Google Drive API', { rangeIndices, hasCustomRange: !!customRange });
         const pdfStartTime = Date.now();
         const pdfBuffer = await exportSpreadsheetToPdf(env, sheetId, sheetGid, rangeIndices);
         log.timing('PDF export', Date.now() - pdfStartTime, { sizeBytes: pdfBuffer.byteLength });
