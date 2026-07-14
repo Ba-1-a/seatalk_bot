@@ -3,11 +3,32 @@
 # Date: 2026-06-14
 
 param(
+    [string]$NodePath = "",
     [switch]$SkipWorker = $false,
     [switch]$SkipVercel = $false,
     [switch]$SkipGit = $false
 )
 
+# Find Node 22 executable
+if (-not $NodePath -or -not (Test-Path $NodePath)) {
+    $possiblePaths = @(
+        "..\bin\node-22.23.1",
+        "..\lib\node-v22.17.0-win-x64",
+        "C:\Program Files\nodejs\node.exe"
+    )
+    foreach ($path in $possiblePaths) {
+        $fullPath = Join-Path $PWD.Path $path
+        if (Test-Path $fullPath) {
+            $NodePath = $fullPath
+            break
+        }
+    }
+}
+if (-not $NodePath) {
+    $NodePath = "C:\Users\SPXID3657\Documents\Bawan\Kode\bin\node-22.23.1"
+}
+
+$nodeExe = Join-Path $NodePath "node.exe"
 $ErrorActionPreference = "Stop"
 $projectRoot = $PWD.Path
 

@@ -1,6 +1,9 @@
 # wrangler.toml
 # VASA - Virtual Assistant SOC Arjawinangun
 # Cloudflare Worker Configuration
+#
+# Node.js 22 REQUIRED for wrangler deployment.
+# Use: ..\..\bin\node-22.23.1\npx.cmd wrangler deploy
 
 account_id = "2149c6a4a350952581c0f4e46b93c496"
 

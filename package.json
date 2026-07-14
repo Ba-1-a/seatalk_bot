@@ -4,6 +4,9 @@
   "description": "VASA - Virtual Assistant SOC Arjawinangun",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev",
