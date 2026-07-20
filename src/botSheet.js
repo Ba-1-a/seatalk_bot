@@ -341,14 +341,31 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&pagenum=false`;            // No page numbers
     
     // ================================================================
-    // MAXIMUM QUALITY EXPORT (V7 - NO ADAPTIVE PAPER)
+    // PAPER SIZE SELECTION (V8 - DYNAMIC BASED ON COLUMN COUNT)
     // ================================================================
-    // Selalu gunakan TABLOID landscape + margins 0 untuk maksimalkan resolusi
-    // Tidak ada adaptive paper size - selalu maximum quality
-    // Whitespace minimal karena TABLOID adalah paper size terbesar
+    // Google Drive TABLOID (17"x11") terlalu lebar untuk range sempit.
+    // Jika range hanya 1-4 kolom, Google crop ke kolom pertama.
+    // Solusi: Pilih paper size yang sesuai dengan jumlah kolom.
     // ================================================================
-    exportUrl += `&portrait=false`; // Landscape untuk wide sheets
-    exportUrl += `&size=TABLOID`; // Paper size terbesar (17"x11")
+    let paperSize = 'TABLOID'; // Default untuk sheet lebar
+    let isPortrait = false;
+    
+    if (rangeIndices) {
+      const colCount = rangeIndices.c2 - rangeIndices.c1;
+      if (colCount <= 4) {
+        paperSize = 'EXECUTIVE'; // 7.25"x10.5" untuk 1-4 kolom
+        isPortrait = true;
+      } else if (colCount <= 8) {
+        paperSize = 'LETTER'; // 8.5"x11" untuk 5-8 kolom
+        isPortrait = true;
+      } else {
+        paperSize = 'TABLOID'; // 17"x11" untuk 9+ kolom
+        isPortrait = false;
+      }
+    }
+    
+    exportUrl += `&portrait=${isPortrait ? 'true' : 'false'}`;
+    exportUrl += `&size=${paperSize}`;
     exportUrl += `&fitw=true`; // Fit width
     exportUrl += `&fith=true`; // Fit height
     exportUrl += `&scale=2`; // Max scale dari Google Drive
@@ -357,7 +374,12 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&left_margin=0`;
     exportUrl += `&right_margin=0`;
     
-    googleLog.info('Maximum quality export', { rangeIndices, hasCustomRange: !!rangeIndices });
+    googleLog.info('Export paper size selected', { 
+      paperSize, 
+      isPortrait, 
+      colCount: rangeIndices ? rangeIndices.c2 - rangeIndices.c1 : 'full',
+      rangeIndices 
+    });
     
     // Jika sheet GID diberikan, export sheet tertentu
     if (sheetGid !== null) {
@@ -372,12 +394,19 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
         exportUrl += `&c1=${rangeIndices.c1}`;
         exportUrl += `&r2=${rangeIndices.r2}`;
         exportUrl += `&c2=${rangeIndices.c2}`;
-        googleLog.info('Custom range applied to PDF export', rangeIndices);
+        googleLog.info('Custom range applied to PDF export', { 
+          input: rangeIndices,
+          urlParams: `r1=${rangeIndices.r1}&c1=${rangeIndices.c1}&r2=${rangeIndices.r2}&c2=${rangeIndices.c2}`
+        });
     } else {
         googleLog.info('No custom range - exporting entire sheet');
     }
     
-    googleLog.info('Exporting spreadsheet to PDF', { spreadsheetId, exportUrl: exportUrl.substring(0, 150) });
+    googleLog.info('Exporting spreadsheet to PDF', { 
+      spreadsheetId, 
+      exportUrl: exportUrl.substring(0, 250),
+      fullUrl: exportUrl
+    });
     
     const response = await fetch(exportUrl, {
         method: "GET",
