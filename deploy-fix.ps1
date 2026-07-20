@@ -1,6 +1,7 @@
-# Deployment Script for HTTP 504 Timeout Fix
+# Deployment Script for Seatalk Bot
 # Run this script from: projects/ba-1-a/seatalk_bot/
-# Date: 2026-06-14
+# Date: 2026-07-20
+# Updated: Deployment method using Node 22 directly (wrangler requires v22+)
 
 param(
     [string]$NodePath = "",
@@ -32,7 +33,7 @@ $nodeExe = Join-Path $NodePath "node.exe"
 $ErrorActionPreference = "Stop"
 $projectRoot = $PWD.Path
 
-Write-Host "=== Seatalk Bot - Timeout Fix Deployment ===" -ForegroundColor Cyan
+Write-Host "=== Seatalk Bot - Deployment Script ===" -ForegroundColor Cyan
 Write-Host "Project root: $projectRoot`n"
 
 # ============================================================
@@ -41,22 +42,30 @@ Write-Host "Project root: $projectRoot`n"
 if (-not $SkipWorker) {
     Write-Host "`n[1/4] Deploying Cloudflare Worker..." -ForegroundColor Yellow
     
-    $wranglerPath = Join-Path $projectRoot "bin\node-22.23.1\npx.cmd"
+    # Use Node 22 directly to run wrangler (wrangler v4 requires Node 22+)
+    # Do NOT use npx.cmd because it will use system Node (v20) which is incompatible
+    $wranglerScript = Join-Path $projectRoot "node_modules\wrangler\bin\wrangler.js"
     
-    if (-not (Test-Path $wranglerPath)) {
-        Write-Host "ERROR: Wrangler not found at $wranglerPath" -ForegroundColor Red
-        Write-Host "Please ensure Node 22 is installed in bin/node-22.23.1/" -ForegroundColor Yellow
+    if (-not (Test-Path $wranglerScript)) {
+        Write-Host "ERROR: Wrangler not found at $wranglerScript" -ForegroundColor Red
+        Write-Host "Please run 'npm install' first" -ForegroundColor Yellow
         exit 1
     }
     
     try {
         Push-Location $projectRoot
-        & $wranglerPath wrangler deploy --force
-        Write-Host "✓ Cloudflare Worker deployed successfully" -ForegroundColor Green
+        
+        # Set Cloudflare API token for non-interactive deploy
+        $env:CLOUDFLARE_API_TOKEN = 'cfut_bc8SlAhJhsr7zpQhovoztYVaUbHkM1vG3deMQzL856825c05'
+        
+        # Deploy using Node 22 directly
+        & $nodeExe $wranglerScript deploy --force
+        
+        Write-Host "`n✓ Cloudflare Worker deployed successfully" -ForegroundColor Green
     }
     catch {
-        Write-Host "✗ Worker deployment failed: $_" -ForegroundColor Red
-        Write-Host "Check your wrangler authentication and try again" -ForegroundColor Yellow
+        Write-Host "`n✗ Worker deployment failed: $_" -ForegroundColor Red
+        Write-Host "Check your Cloudflare authentication and try again" -ForegroundColor Yellow
     }
     finally {
         Pop-Location
@@ -84,17 +93,17 @@ if (-not $SkipVercel) {
         
         # Pull environment if needed
         Write-Host "  - Pulling environment variables..." -ForegroundColor Gray
-        vercel pull --yes --yes
+        vercel pull --yes --yes 2>$null
         
-        # Deploy
+        # Deploy to production
         Write-Host "  - Deploying to production..." -ForegroundColor Gray
         vercel --prod --yes
         
-        Write-Host "✓ Vercel function deployed successfully" -ForegroundColor Green
+        Write-Host "`n✓ Vercel function deployed successfully" -ForegroundColor Green
         Write-Host "  Verify at: https://vercel.com/dashboard" -ForegroundColor Cyan
     }
     catch {
-        Write-Host "✗ Vercel deployment failed: $_" -ForegroundColor Red
+        Write-Host "`n✗ Vercel deployment failed: $_" -ForegroundColor Red
         Write-Host "You can deploy manually later with: vercel --prod" -ForegroundColor Yellow
     }
     finally {
@@ -126,24 +135,21 @@ if (-not $SkipGit) {
         # Add all changes
         git add .
         
-        # Commit
+        # Commit with current changes
         $commitMessage = @"
-fix: resolve HTTP 504 timeout errors in group chat screenshot
+fix: resolve spam handling, group chat screenshot, and thread issues
 
-- Increase Vercel maxDuration from 60s to 90s
-- Add exponential backoff retry mechanism (2s -> 4s -> 8s)
-- Add PDF size pre-check (block >3.5MB, warn >2.5MB)
-- Separate rate limit keys for group vs private chat
-- Reduce render timeouts for safety margin
-- Add detailed error messages with actionable hints
-- Enhance logging with isGroup flag
+- Add stripMentions() and deduplicateConsecutiveCommands()
+- Improve argument parsing for screenshot commands in group chat
+- Fix thread handling for long responses in group chat
+- Increase HF Spaces timeout from 30s to 60s for large PDFs
+- Update AGENTS_HANDOVER.md with deployment instructions
 
-Fixes: Bot gagal mengirim gambar di grup
-Root cause: Vercel gateway timeout insufficient for large PDFs
-
-Expected outcome:
-- Group chat success rate: 70% -> 95%
-- Private chat: no regression (100%)
+Fixes:
+- Bot not handling spam commands correctly
+- Group chat screenshot failures due to @mention and argument parsing
+- Large PDF timeouts in HF Spaces (2.6MB PDF)
+- Thread reply inconsistencies in group chat
 "@
         
         git commit -m $commitMessage
@@ -151,14 +157,14 @@ Expected outcome:
         # Push
         git push origin main
         
-        Write-Host "✓ Changes committed and pushed to GitHub" -ForegroundColor Green
-        Write-Host "  Repository: https://github.com/bawanappratama/seatalk-bot" -ForegroundColor Cyan
+        Write-Host "`n✓ Changes committed and pushed to GitHub" -ForegroundColor Green
+        Write-Host "  Repository: https://github.com/Ba-1-a/seatalk_bot" -ForegroundColor Cyan
     }
     catch {
-        Write-Host "✗ Git operations failed: $_" -ForegroundColor Red
+        Write-Host "`n✗ Git operations failed: $_" -ForegroundColor Red
         Write-Host "You can commit manually later with:" -ForegroundColor Yellow
         Write-Host "  git add ." -ForegroundColor White
-        Write-Host "  git commit -m 'fix: resolve HTTP 504 timeout errors'" -ForegroundColor White
+        Write-Host "  git commit -m 'fix: resolve spam handling and group chat issues'" -ForegroundColor White
         Write-Host "  git push origin main" -ForegroundColor White
     }
     finally {
@@ -186,8 +192,8 @@ Vercel Function:
   ✓ Environment: HF_API_KEY configured
 
 GitHub:
-  ✓ Latest commit includes timeout fix changes
-  ✓ Repository: https://github.com/bawanappratama/seatalk-bot
+  ✓ Latest commit includes fix changes
+  ✓ Repository: https://github.com/Ba-1-a/seatalk_bot
 
 Testing:
   [ ] Private chat: /screenshot (should work as before)
@@ -197,25 +203,15 @@ Testing:
 
 Write-Host "`n=== Deployment Complete ===" -ForegroundColor Green
 Write-Host "Monitor logs for any issues:" -ForegroundColor Yellow
-Write-Host "  Cloudflare: .\bin\node-22.23.1\npx.cmd wrangler tail seatalk-bot" -ForegroundColor Gray
+Write-Host "  Cloudflare: .\bin\node-22.23.1\node.exe node_modules\wrangler\bin\wrangler.js tail seatalk-bot" -ForegroundColor Gray
 Write-Host "  Vercel: vercel logs https://seatalkbot.vercel.app/api/pdf-to-png --follow`n" -ForegroundColor Gray
 
-</parameter>
-<task_progress>
-- [x] Explore project structure and understand current implementation
-- [x] Identify the source of the 504 error in the PDF-to-PNG conversion
-- [x] Analyze the screenshot flow and error handling
-- [x] Identify potential causes for group vs private chat difference
-- [x] Design comprehensive fix strategy
-- [x] Implement Phase 1: Timeout & reliability fixes
-- [x] Implement Phase 2: Group chat specific fixes
-- [x] Implement Phase 3: Advanced optimizations
-- [x] Fix remaining clearScreenshotRateLimit calls
-- [x] Update AGENTS_HANDOVER.md with changes
-- [x] Verify Vercel configuration
-- [x] Create deployment guide
-- [x] Create PowerShell deployment script
-- [ ] Execute deployment script
-- [ ] Verify deployment
-</task_progress>
-</write_to_file>
+# ============================================================
+# Quick Deployment Reference
+# ============================================================
+Write-Host "`n=== QUICK REFERENCE ===" -ForegroundColor Cyan
+Write-Host "Worker URL: https://seatalk-bot.bawanappratama.workers.dev" -ForegroundColor White
+Write-Host "GitHub: https://github.com/Ba-1-a/seatalk_bot" -ForegroundColor White
+Write-Host "`nManual deploy commands:" -ForegroundColor Yellow
+Write-Host "  Worker: `$env:CLOUDFLARE_API_TOKEN='cfut_bc8SlAhJhsr7zpQhovoztYVaUbHkM1vG3deMQzL856825c05'; C:\Users\SPXID3657\Documents\Bawan\Kode\bin\node-22.23.1\node.exe node_modules\wrangler\bin\wrangler.js deploy" -ForegroundColor Gray
+Write-Host "  Vercel: vercel --prod --yes" -ForegroundColor Gray
