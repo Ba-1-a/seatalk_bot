@@ -5,11 +5,11 @@
 - Gunakan Cloudflare Workers untuk Event Callback 
 - Selalu comment nama file di setiap awal kode agar aku gak salah edit
 - Karena sudah mentok memanfaatkan tier gratis yang harus daftar KK, kita hindari fitur freemium 
-- Proses screenshot [Export ke PDF -> PDF to PNG -> PNG kirim ke seatalk (reason : Aku mau bot screenshot apa yang user lihat di spreadsheet)
+- Proses screenshot [Export ke PDF -> PDF to PNG -> PNG kirim ke seatalk (reason : Aku mau bot screenshot apa yang user lihat di spreadsheet)]
 - Buat worker lolos seatalk_challenge
 - Jangan render lewat HTML, tapi benar-benar ambil screenshot
 - selalu put secret
-- selalu deploy pakai token lalu push ke GitHub
+- selalu deploy pakai token untuk mencegah user input manual dan selalu push ke GitHub agar tidak ada progres terbuang
 - jangan terlalu agresif saat menggunakan terminal, ada delay beberapa detik
 - jangan ragu untuk menambah file baru maupun menghapus file lama / file yang sudah tidak relevan
 - jangan pakai email default PC, hanya pakai email dibawah ini sesuai kebutuhan:
@@ -63,6 +63,7 @@
 #### Vercel
 
 - https://seatalkbot.vercel.app/
+- VERCEL_TOKEN = vcp_05xEKA7JCRDCpY8uiURVvu99CxqdLtW7x4J1nrxFSJtYSMbTSD2K8wBa
 
 #### Supabase 
 
@@ -82,20 +83,16 @@
 
 ## Kelemahan Yang Diketahui
 
-1. Bot tidak tahan command spam, ketika spam bot memunculkan [❌ Gagal membuat screenshot: vercel PDF-to-PNG gagal: HTTP 403], dan hanya mengirim 1 screenshot saat user spam 3 command
-2. Saat bot dapat command di grup bot hanya mengirim 
-[Untuk screenshot spreadsheet, Anda bisa menggunakan perintah /screenshot atau bilang "screenshot dong" secara natural. Silakan coba lagi dengan perintah yang tepat.
+1. Bot menolak command spam [⏳ Sedang memproses screenshot sebelumnya. Mohon tunggu hingga selesai sebelum request baru.]
+2. Gagal memproses screenshot range panjang yang sebelumnya berhasil, contoh command [/screenshot https://docs.google.com/spreadsheets/d/1p3Ag8tAIBWYxOp9CAtn_He6wiOeEPfj3p_Cfm1RLaI8/edit?pli=1&gid=357702624#gid=357702624 tab_name=Kari Share range=J8:P73]
 
-Contoh: /screenshot atau "screenshot dong"
-
-Saya akan membantu Anda mendapatkan screenshot yang dibutuhkan.], dan tidak mengirim screenshot
-3. Bot masih tidak membalas di thread untuk jawaban panjang 
 
 ## Next Steps
 
 - [x] Fix whitespace issue (V7)
-- [~] Hugging Face Spaces Integration (Need Check)
-- [ ] Fix group chat messaging
+- [x] Hugging Face Spaces Integration (Need Check)
+- [x] Fix group chat messaging
+- [ ] Fix screenshot range besar
 - [ ] Scheduling screenshot (auto-report)
 - [ ] Sheet context understanding untuk AI
 - [ ] Threshold alert & notification

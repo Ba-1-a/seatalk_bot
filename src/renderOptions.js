@@ -1,53 +1,61 @@
+/**
+ * src/renderOptions.js
+ * VASA - Virtual Assistant SOC Arjawinangun
+ * Maximum quality render options untuk screenshot spreadsheet
+ * 
+ * TIDAK ADA ADAPTIVE PAPER SIZE - selalu maximum quality:
+ * - Scale 2.5x untuk sharp text
+ * - Device scale factor 2.5x untuk retina-ready
+ * - Max pages 5 untuk cover sheet besar
+ * - Render delay 1 detik untuk Chrome stabil
+ * 
+ * PDF Size tiers (untuk timeout management):
+ * - <1.5MB: full quality, timeout 90s
+ * - 1.5-3.5MB: full quality, timeout 90s
+ * - 3.5-10MB: maximum quality dengan timeout aman 85s
+ * - >10MB: FORCE SPLIT (throw error untuk auto-split)
+ */
+
+export class SplitRequiredError extends Error {
+  constructor(pdfSizeBytes, message) {
+    super(message || `PDF terlalu besar (${(pdfSizeBytes / 1024 / 1024).toFixed(1)}MB). Harus di-split.`);
+    this.name = 'SplitRequiredError';
+    this.pdfSizeBytes = pdfSizeBytes;
+  }
+}
+
 export function resolveRenderOptions(pdfSizeBytes, overrides = {}) {
   const normalizedSize = Number.isFinite(pdfSizeBytes) ? Math.max(0, pdfSizeBytes) : 0;
 
-  if (normalizedSize >= 2_500_000) {
-    // Large PDF: aggressive optimization to prevent timeout
+  // >10MB: Force split - tidak boleh render single
+  if (normalizedSize > 10_000_000) {
+    throw new SplitRequiredError(normalizedSize, 
+      `PDF terlalu besar (${(normalizedSize / 1024 / 1024).toFixed(1)}MB). ` +
+      `Gunakan range yang lebih kecil (misal: /screenshot range=A1:D250)`
+    );
+  }
+
+  // 3.5-10MB: Maximum quality dengan timeout agak lebih kecil untuk safety margin
+  if (normalizedSize > 3_500_000) {
     return {
-      mode: 'compact',
-      scale: 1.4,
-      maxPages: 1,
-      renderDelayMs: 400,
-      timeoutMs: 40000, // Reduced from 45s to stay well within Vercel 90s limit
-      deviceScaleFactor: 1.25,
+      mode: 'maximum_quality',
+      scale: 2.5,
+      maxPages: 5,
+      renderDelayMs: 1000,
+      timeoutMs: 85000, // Safety margin dari Vercel 90s
+      deviceScaleFactor: 2.5,
       ...overrides
     };
   }
 
-  if (normalizedSize >= 1_500_000) {
-    // Medium-large PDF: balanced with conservative timeout
-    return {
-      mode: 'balanced',
-      scale: 1.7,
-      maxPages: 2,
-      renderDelayMs: 500,
-      timeoutMs: 45000, // Reduced from 50s
-      deviceScaleFactor: 1.4,
-      ...overrides
-    };
-  }
-
-  if (normalizedSize >= 1_000_000) {
-    // Medium PDF: slightly optimized
-    return {
-      mode: 'default',
-      scale: 2.0,
-      maxPages: 2,
-      renderDelayMs: 600,
-      timeoutMs: 50000, // Reduced from 60s
-      deviceScaleFactor: 1.6,
-      ...overrides
-    };
-  }
-
-  // Small PDF: default settings with safe timeout
+  // <3.5MB: Maximum quality dengan timeout penuh
   return {
-    mode: 'default',
-    scale: 2.2,
-    maxPages: 3,
-    renderDelayMs: 700,
-    timeoutMs: 55000, // Reduced from 60s for safety margin
-    deviceScaleFactor: 2,
+    mode: 'maximum_quality',
+    scale: 2.5,
+    maxPages: 5,
+    renderDelayMs: 1000,
+    timeoutMs: 90000, // Maksimal Vercel
+    deviceScaleFactor: 2.5,
     ...overrides
   };
 }

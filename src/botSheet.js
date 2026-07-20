@@ -34,7 +34,7 @@
 import { replyToUser, sendScreenshotToUser, arrayBufferToBase64 } from './utils.js';
 import { importPKCS8, SignJWT } from 'jose';
 import { createLogger, SERVICES } from './logger.js';
-import { resolveRenderOptions } from './renderOptions.js';
+import { resolveRenderOptions, SplitRequiredError } from './renderOptions.js';
 
 const googleLog = createLogger(SERVICES.GOOGLE);
 const vercelLog = createLogger(SERVICES.VERCEL);
@@ -341,87 +341,23 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     exportUrl += `&pagenum=false`;            // No page numbers
     
     // ================================================================
-    // ADAPTIVE PAPER SIZE (V6 - RASIO KONTEN + JS CROP)
+    // MAXIMUM QUALITY EXPORT (V7 - NO ADAPTIVE PAPER)
     // ================================================================
-    // Strategi: Pilih paper size berdasarkan rasio konten aktual
-    // (jumlah baris vs kolom dari range), bukan hanya jumlah kolom.
-    // 
-    // Tujuan: Paper size semirip mungkin dengan rasio konten agar
-    // whitespace dari Google PDF engine minimal. Sisa whitespace
-    // akan di-crop oleh JS browser-side edge scan di Vercel.
-    // 
-    // Rasio konten = jumlah_baris / jumlah_kolom
-    //   - Rasio > 1.2 (lebih tinggi) → portrait
-    //   - Rasio < 0.8 (lebih lebar)  → landscape
-    //   - Di antaranya → square-ish
-    // 
-    // Paper size berdasarkan ukuran konten:
-    //   - 1-2 kolom + sedikit baris → STATEMENT (5.5"x8.5")
-    //   - 1-2 kolom + banyak baris  → LETTER (8.5"x11")
-    //   - 3-4 kolom + sedikit baris → EXECUTIVE (7.25"x10.5")
-    //   - 3-4 kolom + banyak baris  → LETTER
-    //   - 5+ kolom                  → TABLOID (17"x11")
+    // Selalu gunakan TABLOID landscape + margins 0 untuk maksimalkan resolusi
+    // Tidak ada adaptive paper size - selalu maximum quality
+    // Whitespace minimal karena TABLOID adalah paper size terbesar
     // ================================================================
-    if (rangeIndices) {
-      const columnCount = rangeIndices.c2 - rangeIndices.c1;
-      const rowCount = rangeIndices.r2 - rangeIndices.r1;
-      const aspectRatio = rowCount / Math.max(1, columnCount); // baris per kolom
-      
-      let paperSize, isPortrait, useFith;
-      
-      if (columnCount <= 2) {
-        if (rowCount <= 10) {
-          // 1-2 kolom, sedikit baris → STATEMENT (paling kecil)
-          paperSize = 'STATEMENT';
-          isPortrait = true;
-          useFith = true;
-        } else {
-          // 1-2 kolom, banyak baris → LETTER
-          paperSize = 'LETTER';
-          isPortrait = true;
-          useFith = true;
-        }
-      } else if (columnCount <= 4) {
-        if (rowCount <= 15) {
-          // 3-4 kolom, sedikit baris → EXECUTIVE
-          paperSize = 'EXECUTIVE';
-          isPortrait = true;
-          useFith = true;
-        } else {
-          // 3-4 kolom, banyak baris → LETTER
-          paperSize = 'LETTER';
-          isPortrait = true;
-          useFith = true;
-        }
-      } else {
-        // 5+ kolom → TABLOID landscape
-        paperSize = 'TABLOID';
-        isPortrait = false;
-        useFith = false;
-      }
-      
-      exportUrl += `&portrait=${isPortrait ? 'true' : 'false'}`;
-      exportUrl += `&size=${paperSize}`;
-      exportUrl += `&fitw=true`;
-      if (useFith) {
-        exportUrl += `&fith=true`;
-      }
-      exportUrl += `&top_margin=0`;
-      exportUrl += `&bottom_margin=0`;
-      exportUrl += `&left_margin=0`;
-      exportUrl += `&right_margin=0`;
-      
-      googleLog.info('Range export: Adaptive paper V6', { rangeIndices, columnCount, rowCount, aspectRatio, paperSize, isPortrait, useFith });
-    } else {
-      // Full sheet export (tanpa range)
-      exportUrl += `&portrait=true`;
-      exportUrl += `&size=A4`;
-      exportUrl += `&fitw=true`;
-      exportUrl += `&top_margin=0`;
-      exportUrl += `&bottom_margin=0`;
-      exportUrl += `&left_margin=0`;
-      exportUrl += `&right_margin=0`;
-    }
+    exportUrl += `&portrait=false`; // Landscape untuk wide sheets
+    exportUrl += `&size=TABLOID`; // Paper size terbesar (17"x11")
+    exportUrl += `&fitw=true`; // Fit width
+    exportUrl += `&fith=true`; // Fit height
+    exportUrl += `&scale=2`; // Max scale dari Google Drive
+    exportUrl += `&top_margin=0`;
+    exportUrl += `&bottom_margin=0`;
+    exportUrl += `&left_margin=0`;
+    exportUrl += `&right_margin=0`;
+    
+    googleLog.info('Maximum quality export', { rangeIndices, hasCustomRange: !!rangeIndices });
     
     // Jika sheet GID diberikan, export sheet tertentu
     if (sheetGid !== null) {
@@ -429,19 +365,7 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     }
     
     // ================================================================
-    // PERBAIKAN: Custom range support via parameter r1,c1,r2,c2
-    // ================================================================
-    // Google Drive API export mendukung parameter range:
-    //   r1 = start row index (0-based, inclusive)
-    //   r2 = end row index (0-based, exclusive)
-    //   c1 = start column index (0-based, inclusive)  
-    //   c2 = end column index (0-based, exclusive)
-    //
-    // Contoh: range "A1:D15" → r1=0, c1=0, r2=15, c2=4
-    //          range "C5:F20" → r1=4, c1=2, r2=20, c2=6
-    //
-    // Tanpa parameter ini: export FULL SHEET (seluruh halaman)
-    // Dengan parameter: export HANYA area yang ditentukan
+    // CUSTOM RANGE SUPPORT via parameter r1,c1,r2,c2
     // ================================================================
     if (rangeIndices) {
         exportUrl += `&r1=${rangeIndices.r1}`;
@@ -484,7 +408,8 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
         spreadsheetId, 
         sizeBytes: pdfBuffer.byteLength,
         hasRange: !!rangeIndices,
-        range: rangeIndices
+        range: rangeIndices,
+        sizeMB: (pdfBuffer.byteLength / 1024 / 1024).toFixed(2)
     });
     
     if (pdfBuffer.byteLength < 200) {
@@ -492,6 +417,65 @@ async function exportSpreadsheetToPdf(env, spreadsheetId, sheetGid = null, range
     }
     
     return pdfBuffer;
+}
+
+/**
+ * Hitung estimasi ukuran PDF berdasarkan range
+ * Heuristik: ~500 bytes per cell
+ * @param {Object} rangeIndices - { r1, c1, r2, c2 }
+ * @returns {Number} Estimated size in bytes
+ */
+function estimatePdfSize(rangeIndices) {
+  if (!rangeIndices) return 500_000; // Default 500KB untuk full sheet
+  
+  const rowCount = rangeIndices.r2 - rangeIndices.r1;
+  const colCount = rangeIndices.c2 - rangeIndices.c1;
+  const cellCount = rowCount * colCount;
+  
+  // Heuristik: 500 bytes per cell (text + formatting)
+  const estimatedBytes = cellCount * 500;
+  
+  googleLog.info('PDF size estimation', { rowCount, colCount, cellCount, estimatedBytes });
+  return estimatedBytes;
+}
+
+/**
+ * Split large range menjadi chunks yang lebih kecil
+ * @param {Object} rangeIndices - { r1, c1, r2, c2 }
+ * @param {Number} maxRowsPerChunk - Maksimal baris per chunk (default: 300)
+ * @returns {Array} Array of { r1, c1, r2, c2 }
+ */
+export function splitLargeRange(rangeIndices, maxRowsPerChunk = 300) {
+  if (!rangeIndices) return [rangeIndices];
+  
+  const { r1, c1, r2, c2 } = rangeIndices;
+  const totalRows = r2 - r1;
+  
+  if (totalRows <= maxRowsPerChunk) {
+    return [rangeIndices]; // Tidak perlu split
+  }
+  
+  const chunks = [];
+  let currentStart = r1;
+  
+  while (currentStart < r2) {
+    const currentEnd = Math.min(currentStart + maxRowsPerChunk, r2);
+    chunks.push({
+      r1: currentStart,
+      c1: c1,
+      r2: currentEnd,
+      c2: c2
+    });
+    currentStart = currentEnd;
+  }
+  
+  googleLog.info('Range split into chunks', { 
+    original: rangeIndices, 
+    chunkCount: chunks.length,
+    chunkRows: maxRowsPerChunk 
+  });
+  
+  return chunks;
 }
 
 /**
@@ -537,13 +521,8 @@ async function convertPdfToPng(pdfBuffer, env) {
     let attempt = 0;
     let lastError;
 
-    // Pre-flight size check
+    // Pre-flight size check - no hard limit, renderOptions will handle >10MB via SplitRequiredError
     const pdfSizeMB = pdfBuffer.byteLength / 1024 / 1024;
-    if (pdfSizeMB > 3.5) {
-        vercelLog.warn('PDF too large for reliable conversion', { pdfSizeMB });
-        throw new Error(`Sheet terlalu besar (${pdfSizeMB.toFixed(1)}MB). Coba gunakan range yang lebih kecil (misal: /screenshot range=A1:D50)`);
-    }
-    
     if (pdfSizeMB > 2.5) {
         vercelLog.warn('Large PDF detected, may take longer', { pdfSizeMB });
     }
@@ -730,56 +709,6 @@ async function clearScreenshotRateLimit(env, targetId, isGroup, reqId) {
   }
 }
 
-/**
- * PER-SHEET CONCURRENCY LOCK
- * HF Spaces free tier = single instance. Jika banyak user di group chat request
- * screenshot bersamaan, request akan antri dan timeout (504).
- * Lock ini mencegah 2 request untuk SHEET YANG SAMA dieksekusi bersamaan.
- * Request ke-2 akan menunggu (queue) hingga request ke-1 selesai, bukan langsung timeout.
- *
- * @param {Object} env - Environment variables
- * @param {String} sheetId - Spreadsheet ID (lock key)
- * @param {Number} maxWaitMs - Max waktu tunggu sebelum give up
- * @returns {Boolean} true jika lock didapat, false jika timeout waiting
- */
-async function acquireSheetLock(env, sheetId, maxWaitMs = 45000) {
-  const lockKey = `sheet_lock_${sheetId}`;
-  const start = Date.now();
-  const waitStep = 1500;
-
-  while (Date.now() - start < maxWaitMs) {
-    const existing = await env.BOT_MEMORY.get(lockKey);
-    if (!existing) {
-      // Lock bebas, ambil lock dengan TTL 60s (cukup untuk 1 render)
-      await env.BOT_MEMORY.put(lockKey, Date.now().toString(), { expirationTtl: 60 });
-      googleLog.info('Sheet lock acquired', { sheetId });
-      return true;
-    }
-    googleLog.warn('Sheet lock busy, waiting...', {
-      sheetId,
-      waitedMs: Date.now() - start,
-      lockedAt: existing
-    });
-    await new Promise(resolve => setTimeout(resolve, waitStep));
-  }
-
-  googleLog.error('Sheet lock timeout - giving up', { sheetId, maxWaitMs });
-  return false;
-}
-
-/**
- * Lepas per-sheet lock setelah render selesai (sukses/gagal)
- */
-async function releaseSheetLock(env, sheetId) {
-  const lockKey = `sheet_lock_${sheetId}`;
-  try {
-    await env.BOT_MEMORY.delete(lockKey);
-    googleLog.debug('Sheet lock released', { sheetId });
-  } catch (err) {
-    googleLog.debug('Failed to release sheet lock', { error: err.message, sheetId });
-  }
-}
-
 // ============================================================
 // MAIN SCREENSHOT FUNCTION
 // ============================================================
@@ -951,8 +880,9 @@ function parseScreenshotArguments(tokens) {
  * 4. Kirim PNG ke SeaTalk
  * 
  * PERBAIKAN:
- * - "Pesan processing" sudah dikirim oleh index.js via ctx.waitUntil
- * - Custom range diproses dan diteruskan ke Google Drive API export
+ * - Auto-split untuk range besar (>300 baris) menjadi chunks
+ * - Per-sheet lock DIHAPUS untuk paralel HF Spaces
+ * - Maximum quality preset (TABLOID, DPR 2.5)
  */
 export async function handleScreenshotCommand(env, targetId, text, isGroup, threadId, originalMessageId) {
     const startTime = Date.now();
@@ -1008,28 +938,12 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, currentThreadId, originalMessageId);
     }
 
-    // ================================================================
-    // PER-SHEET CONCURRENCY LOCK
-    // HF Spaces free tier = single instance. Di group chat, multiple user
-    // bisa request sheet yg SAMA bersamaan -> request antri & timeout (504).
-    // Lock ini membuat request ke-2 menunggu (queue) hingga ke-1 selesai.
-    // ================================================================
-    log.decision('Acquiring per-sheet lock', { sheetId });
-    const lockAcquired = await acquireSheetLock(env, sheetId, 45000);
-    if (!lockAcquired) {
-        log.warn('Sheet lock timeout - too many concurrent requests', { sheetId });
-        await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
-        return await replyToUser(env,
-            "⏳ Layanan render sedang sangat sibuk. Mohon tunggu 1-2 menit lalu coba lagi.",
-            targetId, isGroup, threadId, originalMessageId);
-    }
+    // PER-SHEET LOCK DIHAPUS - HF Spaces sekarang support paralel rendering
+    // Rate limit tetap ada per-user/group untuk proteksi spam
 
     const targetLabel = isGroup ? 'grup' : 'chat';
-    const processingMessage = isGroup
-        ? `⏳ Memproses screenshot untuk ${targetLabel} ini. Proses bisa memakan waktu beberapa detik.`
-        : '⏳ Sedang memproses screenshot...';
     if (isGroup) {
-        await replyToUser(env, processingMessage, targetId, isGroup, threadId, originalMessageId).catch(() => {});
+        await replyToUser(env, `⏳ Memproses screenshot untuk ${targetLabel} ini...`, targetId, isGroup, threadId, originalMessageId).catch(() => {});
     }
     
     const tokensForTabAndRange = explicitSheetId
@@ -1056,11 +970,7 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         }
         
      // ================================================================
-     // PERBAIKAN: Parse custom range untuk Google Drive export
-     // ================================================================
-     // User input: "A1:D15" → parseCustomRange → "A1:D15"
-     // → parseA1RangeToIndices → { r1:0, c1:0, r2:15, c2:4 }
-     // → exportSpreadsheetToPdf dengan rangeIndices
+     // PARSE CUSTOM RANGE untuk Google Drive export
      // ================================================================
      let rangeIndices = null;
      if (customRange) {
@@ -1072,6 +982,44 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
          }
      } else {
          googleLog.info('Screenshot: No custom range provided, exporting full sheet');
+     }
+     
+     // Check jika perlu auto-split (estimasi > 10MB)
+     const estimatedSize = estimatePdfSize(rangeIndices);
+     if (estimatedSize > 10_000_000) {
+         // Auto-split untuk range besar
+         const chunks = splitLargeRange(rangeIndices, 300);
+         googleLog.info('Auto-splitting large range', { chunkCount: chunks.length });
+         
+         await replyToUser(env, 
+             `📸 Sheet besar terdeteksi. Saya pecah jadi ${chunks.length} bagian untuk hasil maksimal.`,
+             targetId, isGroup, currentThreadId, originalMessageId
+         );
+         
+         // Process each chunk sequentially untuk avoid overload
+         for (let i = 0; i < chunks.length; i++) {
+             const chunk = chunks[i];
+             await replyToUser(env, 
+                 `📤 Mengirim bagian ${i + 1}/${chunks.length}...`,
+                 targetId, isGroup, currentThreadId, originalMessageId
+             );
+             
+             try {
+                 // Export + convert per chunk
+                 const chunkPdfBuffer = await exportSpreadsheetToPdf(env, sheetId, sheetGid, chunk);
+                 const chunkPngBuffer = await convertPdfToPng(chunkPdfBuffer, env);
+                 await sendScreenshotToUser(env, chunkPngBuffer, targetId, isGroup, currentThreadId, originalMessageId);
+             } catch (chunkErr) {
+                 googleLog.error('Chunk processing failed', { chunkIndex: i, error: chunkErr.message });
+                 await replyToUser(env, 
+                     `❌ Gagal memproses bagian ${i + 1}/${chunks.length}: ${chunkErr.message}`,
+                     targetId, isGroup, currentThreadId, originalMessageId
+                 );
+             }
+         }
+         
+         await replyToUser(env, "✅ Semua bagian telah dikirim!", targetId, isGroup, currentThreadId, originalMessageId);
+         return;
      }
      
      log.enter('STEP 2: Export to PDF');
@@ -1117,8 +1065,7 @@ export async function handleScreenshotCommand(env, targetId, text, isGroup, thre
         log.timing('Total screenshot', Date.now() - startTime);
         // Bersihkan rate limit flag setelah selesai (baik success maupun error)
         await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
-        // Lepas per-sheet lock agar request berikutnya bisa jalan
-        await releaseSheetLock(env, sheetId);
+        // Per-sheet lock DIHAPUS - tidak perlu release
     }
 }
 
