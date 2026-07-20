@@ -167,20 +167,25 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
     session.history.push({ role: "assistant", content: reply });
     await env.BOT_MEMORY.put(kvKey, JSON.stringify(session), { expirationTtl: 7200 });
 
-    // 8. Auto-threading untuk jawaban panjang di grup
+    // 8. Auto-threading untuk jawaban panjang di grup (& thread untuk image)
     const wordCount = countWords(reply);
     const chunks = smartChunkMessage(reply);
     
-    if (wordCount > 20 && isGroup) {
-      const initResp = await replyToUser(env, "Aku balas di thread ya! 👇", targetId, isGroup, threadId, originalMessageId);
-      // Gunakan messageId dari response sebagai thread_id untuk reply selanjutnya
-      const newThreadId = initResp?.messageId
-        || initResp?.threadId
-        || initResp?.message?.thread_id
-        || initResp?.message?.message_id
-        || originalMessageId;
-      log.info('Auto-threading: Created new thread', { newThreadId, originalMessageId });
-      for (const chunk of chunks) await replyToUser(env, chunk, targetId, isGroup, newThreadId, null);
+    if (isGroup) {
+      // Untuk grup: kirim image via base64 biasanya masuk thread
+      // Tapi kalau respons panjang (>20 kata), buat thread baru
+      if (wordCount > 20) {
+        const initResp = await replyToUser(env, "Aku balas di thread ya! 👇", targetId, isGroup, threadId, originalMessageId);
+        const newThreadId = initResp?.messageId
+          || initResp?.threadId
+          || initResp?.message?.thread_id
+          || initResp?.message?.message_id
+          || originalMessageId;
+        log.info('Auto-threading: Created new thread', { newThreadId, originalMessageId });
+        for (const chunk of chunks) await replyToUser(env, chunk, targetId, isGroup, newThreadId, null);
+      } else {
+        for (const chunk of chunks) await replyToUser(env, chunk, targetId, isGroup, threadId, originalMessageId);
+      }
     } else {
       for (const chunk of chunks) await replyToUser(env, chunk, targetId, isGroup, threadId, originalMessageId);
     }

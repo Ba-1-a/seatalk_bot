@@ -884,6 +884,7 @@ export async function handleReadSheet(env, targetId, text, isGroup, threadId, or
 
 /**
  * Parse argument untuk screenshot command
+ * FIX: Handle @mention, duplicate commands, dan token yang sudah di-clean
  */
 function parseScreenshotArguments(tokens) {
     let tabNameParts = [];
@@ -893,29 +894,27 @@ function parseScreenshotArguments(tokens) {
     for (let token of tokens) {
         if (!token) continue;
         const lowerToken = token.toLowerCase();
+        
+        // Skip URL patterns (sudah di-handle oleh extractSpreadsheetId)
         if (/^(https?:\/\/|www\.|docs\.google\.com\/spreadsheets)/i.test(token)) {
             continue;
         }
-        if (/^url=/i.test(token)) {
-            continue;
-        }
-
-        if (/^(range|r)=/i.test(token)) {
-            const parsed = parseCustomRange(token);
-            if (parsed) {
-                customRange = parsed;
+        
+        // Skip URL parameter patterns
+        if (/^(url=|range=|r=|sheet_name=|sheet=|tab_name=)/i.test(token)) {
+            // Handle range= pattern
+            if (/^(range|r)=/i.test(token)) {
+                const rangeValue = token.split(/[=:]/)[1];
+                if (rangeValue) {
+                    const parsed = parseCustomRange(rangeValue);
+                    if (parsed) customRange = parsed;
+                }
             }
             collectingSheetName = false;
             continue;
         }
 
-        const sheetNameMatch = token.match(/^(sheet_name|sheet|tab_name)=(.+)$/i);
-        if (sheetNameMatch) {
-            collectingSheetName = true;
-            tabNameParts.push(sheetNameMatch[2]);
-            continue;
-        }
-
+        // Check if token is a range pattern (A1:D15, 5-30, D15, etc)
         const rangeParsed = parseCustomRange(token);
         if (rangeParsed && !customRange) {
             customRange = rangeParsed;
@@ -923,12 +922,21 @@ function parseScreenshotArguments(tokens) {
             continue;
         }
 
-        if (collectingSheetName) {
-            tabNameParts.push(token);
+        // Sheet name pattern
+        const sheetNameMatch = token.match(/^(sheet_name|sheet|tab_name)=(.+)$/i);
+        if (sheetNameMatch) {
+            collectingSheetName = true;
+            tabNameParts.push(sheetNameMatch[2]);
             continue;
         }
 
-        tabNameParts.push(token);
+        // Everything else goes to tabNameParts
+        if (collectingSheetName) {
+            tabNameParts.push(token);
+        } else if (!/^\/screenshot$/.test(token)) {
+            // Skip the command itself, but keep other tokens
+            tabNameParts.push(token);
+        }
     }
 
     return { tabName: tabNameParts.join(" ").trim(), customRange };

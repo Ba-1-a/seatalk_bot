@@ -27,7 +27,7 @@
  */
 
 import { handleGeneralChat } from './src/botCoding.js';
-import { extractIncomingText, sendSystemWebhook, replyToUser } from './src/utils.js';
+import { extractIncomingText, sendSystemWebhook, replyToUser, stripMentions, deduplicateConsecutiveCommands } from './src/utils.js';
 import { getHourlyReportData, handleInventoryQuery, handleSetSheet, handleReadSheet, handleScreenshotCommand } from './src/botSheet.js';
 import { createLogger, SERVICES, getLogFileInfo } from './src/logger.js';
 
@@ -100,8 +100,12 @@ export default {
       const threadId = message.thread_id || "";
       const messageId = message.message_id || "";
 
-      const incomingText = extractIncomingText(message);
+      let incomingText = extractIncomingText(message);
       if (!incomingText) return new Response("OK", { status: 200 });
+
+      // FIX: Clean up incoming text - strip @mention, deduplicate commands
+      incomingText = stripMentions(incomingText);
+      incomingText = deduplicateConsecutiveCommands(incomingText);
 
       // Cek deduplikasi: jika message_id sudah diproses, skip
       // Ini penting karena screenshot synchronous bisa menyebabkan SeaTalk timeout dan retry

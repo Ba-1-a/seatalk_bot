@@ -27,7 +27,7 @@ const app = express();
 const PORT = process.env.PORT || 7860;
 const API_KEY = process.env.HF_API_KEY || 'your-secret-api-key-here';
 const MAX_PDF_SIZE = 10 * 1024 * 1024; // 10MB
-const REQUEST_TIMEOUT = 120000; // 120 detik (2 menit) - untuk PDF besar
+const REQUEST_TIMEOUT = 60000; // 60 detik - default timeout untuk PDF besar
 const BROWSER_CLOSE_TIMEOUT = 10000; // 10 detik
 
 // Rate limiting (in-memory, reset on restart)

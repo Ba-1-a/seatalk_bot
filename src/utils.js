@@ -16,6 +16,44 @@ import { createLogger, SERVICES } from './logger.js';
 const log = createLogger(SERVICES.SEATALK);
 
 /**
+ * Strip @mention dan bot mention dari teks
+ * @param {String} text - Teks input
+ * @returns {String} Teks yang sudah dibersihkan
+ */
+export function stripMentions(text) {
+  if (!text) return "";
+  return text
+    .replace(/@\w+/g, "") // Remove @username
+    .replace(/\/{2,}/g, "/") // Remove double slash
+    .trim();
+}
+
+/**
+ * Deduplicate consecutive duplicate commands
+ * @param {String} text - Teks input
+ * @returns {String} Teks yang sudah di-clean
+ */
+export function deduplicateConsecutiveCommands(text) {
+  if (!text) return "";
+  const tokens = text.split(/\s+/);
+  const cleaned = [];
+  let lastCmd = null;
+  
+  for (const token of tokens) {
+    if (/^\/(\w+)$/.test(token)) {
+      if (token !== lastCmd) {
+        cleaned.push(token);
+        lastCmd = token;
+      }
+    } else {
+      cleaned.push(token);
+    }
+  }
+  
+  return cleaned.join(" ").trim();
+}
+
+/**
  * Extract teks dari berbagai format pesan SeaTalk
  * @param {Object} message - Object pesan dari SeaTalk
  * @returns {String} Teks yang diekstrak
