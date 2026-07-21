@@ -49,9 +49,7 @@ function sanitizePemKey(raw) {
     key = key.replace(/\r\n/g, '\n');    // CRLF ke LF
     key = key.replace(/\r/g, '\n');      // CR ke LF
     
-    // Remove extra whitespace per line
-    const lines = key.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-    key = lines.join('\n');
+    // NOTE: Don't trim per-line! Base64 is whitespace-sensitive.
     
     // Validate structure
     if (!key.includes('-----BEGIN PRIVATE KEY-----')) {
@@ -114,9 +112,14 @@ async function getGoogleToken(env) {
     // Sanitasi ekstrem
     const pemKey = sanitizePemKey(rawKey);
     
+    googleLog.info('PEM snippet after sanitize', {
+        firstChars: pemKey.slice(0, 20),
+        lastChars: pemKey.slice(-20)
+    });
+    
     let privateKey;
     try {
-        privateKey = await importPKCS8(pemKey, 'RS256');
+        privateKey = await importPKCS8(pemKey, 'pem');
     } catch (keyErr) {
         throw new Error(
             'Gagal memparse GOOGLE_PRIVATE_KEY. Pastikan formatnya benar.\n' +
