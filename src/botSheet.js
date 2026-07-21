@@ -62,23 +62,6 @@ function sanitizePemKey(raw) {
     return key;
 }
 
-function pemToDer(pem) {
-    let b64 = pem
-        .replace(/-----BEGIN PRIVATE KEY-----/, '')
-        .replace(/-----END PRIVATE KEY-----/, '')
-        .replace(/\s/g, '');
-    
-    if (!b64) throw new Error('PEM base64 kosong');
-    
-    const binaryString = atob(b64);
-    const bytes = new Uint8Array(binaryString.length);
-    for (let i = 0; i < binaryString.length; i++) {
-        bytes[i] = binaryString.charCodeAt(i);
-    }
-    
-    return bytes;
-}
-
 async function getGoogleToken(env) {
     const cacheKey = "google_oauth_token";
     try {
@@ -134,19 +117,17 @@ async function getGoogleToken(env) {
         lastChars: pemKey.slice(-20)
     });
     
-    // Convert PEM to DER manually for reliable parsing
-    const der = pemToDer(pemKey);
-    const base64Clean = pemKey.replace(/-----BEGIN PRIVATE KEY-----/, '').replace(/-----END PRIVATE KEY-----/, '').replace(/\s/g, '');
-    googleLog.info('DER conversion diagnostics', {
-        lineCount: pemKey.split('\n').length,
-        base64Length: base64Clean.length,
-        derLength: der.length,
-        firstBytes: Array.from(der.slice(0, 10))
+    // Runtime type checking
+    googleLog.info('importPKCS8 input type check', {
+        type: typeof pemKey,
+        isString: typeof pemKey === 'string',
+        length: pemKey.length,
+        startsWithHeader: pemKey.startsWith('-----BEGIN PRIVATE KEY-----')
     });
     
     let privateKey;
     try {
-        privateKey = await importPKCS8(der, 'der');
+        privateKey = await importPKCS8(pemKey, 'RS256');
     } catch (keyErr) {
         throw new Error(
             'Gagal memparse GOOGLE_PRIVATE_KEY. Pastikan formatnya benar.\n' +
