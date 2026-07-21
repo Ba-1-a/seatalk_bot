@@ -45,9 +45,9 @@ function sanitizePemKey(raw) {
     }
     
     // Normalize newline variants
-    key = key.replace(/\\n/g, '\n');      // escaped newline ke actual newline
-    key = key.replace(/\r\n/g, '\n');    // CRLF ke LF
-    key = key.replace(/\r/g, '\n');      // CR ke LF
+    key = key.replace(/\\n/g, '\n');
+    key = key.replace(/\r\n/g, '\n');
+    key = key.replace(/\r/g, '\n');
     
     // NOTE: Don't trim per-line! Base64 is whitespace-sensitive.
     
@@ -60,6 +60,23 @@ function sanitizePemKey(raw) {
     }
     
     return key;
+}
+
+function pemToDer(pem) {
+    let b64 = pem
+        .replace(/-----BEGIN PRIVATE KEY-----/, '')
+        .replace(/-----END PRIVATE KEY-----/, '')
+        .replace(/\s/g, '');
+    
+    if (!b64) throw new Error('PEM base64 kosong');
+    
+    const binaryString = atob(b64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+    }
+    
+    return bytes;
 }
 
 async function getGoogleToken(env) {
@@ -117,9 +134,19 @@ async function getGoogleToken(env) {
         lastChars: pemKey.slice(-20)
     });
     
+    // Convert PEM to DER manually for reliable parsing
+    const der = pemToDer(pemKey);
+    const base64Clean = pemKey.replace(/-----BEGIN PRIVATE KEY-----/, '').replace(/-----END PRIVATE KEY-----/, '').replace(/\s/g, '');
+    googleLog.info('DER conversion diagnostics', {
+        lineCount: pemKey.split('\n').length,
+        base64Length: base64Clean.length,
+        derLength: der.length,
+        firstBytes: Array.from(der.slice(0, 10))
+    });
+    
     let privateKey;
     try {
-        privateKey = await importPKCS8(pemKey, 'pem');
+        privateKey = await importPKCS8(der, 'der');
     } catch (keyErr) {
         throw new Error(
             'Gagal memparse GOOGLE_PRIVATE_KEY. Pastikan formatnya benar.\n' +
