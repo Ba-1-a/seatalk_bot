@@ -26,11 +26,12 @@ binding = "AI"
 GOOGLE_CLIENT_EMAIL = "vasa-725@studio-1196053014-a94d0.iam.gserviceaccount.com"
 # Supabase Config
 SUPABASE_URL = "https://gsdtravhmqbzkwdujkve.supabase.co"
-# URL untuk Vercel PDF-to-PNG endpoint
-VERCEL_PDF_TO_PNG_URL = "https://seatalkbot.vercel.app/api/pdf-to-png"
+# HF Spaces Centralized Rendering API
+HF_SPACES_URL = "https://ba-1-a-b-cube-tech.hf.space"
 
 # Secrets (jangan simpan di sini, set via wrangler secret put):
 # - SEATALK_APP_ID
 # - SEATALK_APP_SECRET
 # - GOOGLE_PRIVATE_KEY
 # - SUPABASE_SERVICE_ROLE_KEY
+# - HF_API_KEY (Bearer token untuk akses HF Spaces)

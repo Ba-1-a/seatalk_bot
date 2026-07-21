@@ -3,21 +3,26 @@
  * VASA - Virtual Assistant SOC Arjawinangun
  * Cloudflare Worker sebagai Event Callback & Cron Executor
  * 
- * ARSITEKTUR:
+ * ARSITEKTUR (BYPASS MEMORI):
  * - Cloudflare Workers = GERBANG UTAMA (Event Callback SeaTalk)
- * - Vercel = Helper PDF-to-PNG (puppeteer) - endpoint /api/pdf-to-png
+ * - HF Spaces = Centralized Rendering API (PDF → PNG)
  * - Supabase = Database (cadangan untuk log/channel config)
  * 
- * ALUR SCREENSHOT (TANPA FREEMIUM):
- * 1. Export spreadsheet ke PDF via Google Drive API (gratis)
- * 2. Kirim PDF ke Vercel endpoint /api/pdf-to-png untuk di-convert ke PNG
- * 3. Kirim PNG ke SeaTalk via base64
+ * ALUR SCREENSHOT (ASYNC - NO VERCEL):
+ * 1. Worker generate Google Sheet export URL (TIDAK download PDF)
+ * 2. Get Google OAuth token (untuk private sheets)
+ * 3. Kirim message "Memproses..." ke SeaTalk (sync)
+ * 4. ctx.waitUntil() untuk background task:
+ *    - POST ke HF Spaces dengan sheet_url + google_access_token
+ *    - HF Spaces download PDF, render PNG, return binary
+ *    - Worker kirim PNG ke SeaTalk
+ * 5. Worker langsung return 200 (tidak tunggu HF Spaces)
  * 
- * PERBAIKAN:
- * - Deduplikasi message_id: Cegah pemrosesan ulang saat SeaTalk retry
- * - Semua command diproses SYNCHRONOUS (termasuk screenshot)
- * - SeaTalk timeout (5s) akan trigger retry → dedup handle → return 200 segera
- * - Worker timeout 30 detik cukup untuk screenshot (max ~25-35 detik)
+ * KEUNTUNGAN:
+ * - Tidak ada Vercel dependency
+ * - Tidak ada Base64 PDF encoding (hemat bandwidth)
+ * - Tidak ada CF Worker timeout (30 detik)
+ * - Private sheets supported (Google auth transfer)
  * 
  * Fitur:
  * - Webhook callback untuk SeaTalk dengan seatalk_challenge handler
@@ -147,7 +152,7 @@ export default {
         await handleReadSheet(env, targetId, incomingText, isGroup, threadId, messageId);
       } else if (incomingText.includes("/screenshot")) {
         reqLog.info('Routing → /screenshot');
-        await handleScreenshotCommand(env, targetId, incomingText, isGroup, threadId, messageId);
+        await handleScreenshotCommand(env, targetId, incomingText, isGroup, threadId, messageId, ctx);
       } else {
         reqLog.info('Routing → /general-chat (AI)');
         // AI chat cepat (<5 detik), aman synchronous
