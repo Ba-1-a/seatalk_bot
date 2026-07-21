@@ -77,17 +77,39 @@ async function getGoogleToken(env) {
     }
 
     const now = Math.floor(Date.now() / 1000);
-    const rawKey = env.GOOGLE_PRIVATE_KEY;
     
-    // Diagnostic logging (non-sensitive)
-    googleLog.info('GOOGLE_PRIVATE_KEY diagnostic', {
-        exists: !!rawKey,
-        length: rawKey ? rawKey.length : 0,
-        hasLiteralBackslashN: rawKey ? rawKey.includes('\\n') : false,
-        hasActualNewline: rawKey ? rawKey.includes('\n') : false,
-        hasHeader: rawKey ? rawKey.includes('-----BEGIN PRIVATE KEY-----') : false,
-        hasFooter: rawKey ? rawKey.includes('-----END PRIVATE KEY-----') : false
-    });
+    // Option B: Load dari service account JSON (lebih robust)
+    let serviceAccount = null;
+    let clientEmail = env.GOOGLE_CLIENT_EMAIL;
+    let rawKey = null;
+    
+    if (env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+        // Parse service account JSON
+        try {
+            serviceAccount = JSON.parse(env.GOOGLE_SERVICE_ACCOUNT_JSON);
+        } catch (parseErr) {
+            throw new Error(
+                'Gagal parse GOOGLE_SERVICE_ACCOUNT_JSON. Pastikan secret berisi JSON service account yang valid.\n' +
+                `Detail: ${parseErr.message}`
+            );
+        }
+        
+        rawKey = serviceAccount.private_key;
+        clientEmail = serviceAccount.client_email;
+        
+        googleLog.info('Loaded service account from JSON', {
+            hasPrivateKey: !!rawKey,
+            hasClientEmail: !!clientEmail,
+            keyLength: rawKey ? rawKey.length : 0
+        });
+    } else {
+        // Fallback ke old path (GOOGLE_PRIVATE_KEY env)
+        rawKey = env.GOOGLE_PRIVATE_KEY;
+    }
+    
+    if (!rawKey) {
+        throw new Error('GOOGLE_PRIVATE_KEY atau GOOGLE_SERVICE_ACCOUNT_JSON tidak dikonfigurasi');
+    }
     
     // Sanitasi ekstrem
     const pemKey = sanitizePemKey(rawKey);
@@ -106,7 +128,7 @@ async function getGoogleToken(env) {
     let jwt;
     try {
         jwt = await new SignJWT({
-            iss: env.GOOGLE_CLIENT_EMAIL,
+            iss: clientEmail,
             scope: "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly",
             aud: "https://oauth2.googleapis.com/token",
             exp: now + 3600, iat: now,
