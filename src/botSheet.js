@@ -47,15 +47,42 @@ async function getGoogleToken(env) {
 
     const now = Math.floor(Date.now() / 1000);
     let pemKey = env.GOOGLE_PRIVATE_KEY;
-    if (pemKey.includes('\\n')) pemKey = pemKey.replace(/\\n/g, '\n');
     
-    const privateKey = await importPKCS8(pemKey, 'RS256');
-    const jwt = await new SignJWT({
-        iss: env.GOOGLE_CLIENT_EMAIL,
-        scope: "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly",
-        aud: "https://oauth2.googleapis.com/token",
-        exp: now + 3600, iat: now,
-    }).setProtectedHeader({ alg: 'RS256', typ: 'JWT' }).sign(privateKey);
+    // Handle berbagai format GOOGLE_PRIVATE_KEY:
+    // 1. Dari wrangler secret: biasanya ada \\n literal (escaped newline)
+    // 2. Dari environment variable: ada \n actual newline
+    // 3. Dari JSON langsung: ada \n actual newline
+    if (pemKey.includes('\\n')) {
+        pemKey = pemKey.replace(/\\n/g, '\n');
+    }
+    
+    // Validasi: Pastikan ada header/footer PEM yang benar
+    if (!pemKey.includes('-----BEGIN PRIVATE KEY-----')) {
+        throw new Error('GOOGLE_PRIVATE_KEY tidak valid: tidak ditemukan header "BEGIN PRIVATE KEY". Pastikan format PEM benar.');
+    }
+    
+    let privateKey;
+    try {
+        privateKey = await importPKCS8(pemKey, 'RS256');
+    } catch (keyErr) {
+        throw new Error(
+            'Gagal memparse GOOGLE_PRIVATE_KEY. Pastikan formatnya benar.\n' +
+            'Coba set ulang: Get-Content google-key.pem | wrangler secret put GOOGLE_PRIVATE_KEY\n' +
+            `Detail: ${keyErr.message}`
+        );
+    }
+
+    let jwt;
+    try {
+        jwt = await new SignJWT({
+            iss: env.GOOGLE_CLIENT_EMAIL,
+            scope: "https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.readonly",
+            aud: "https://oauth2.googleapis.com/token",
+            exp: now + 3600, iat: now,
+        }).setProtectedHeader({ alg: 'RS256', typ: 'JWT' }).sign(privateKey);
+    } catch (jwtErr) {
+        throw new Error(`Gagal membuat JWT untuk Google OAuth: ${jwtErr.message}`);
+    }
 
     const res = await fetch("https://oauth2.googleapis.com/token", {
         method: "POST",
