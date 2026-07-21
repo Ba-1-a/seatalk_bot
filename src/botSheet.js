@@ -33,6 +33,37 @@ const hfLog = createLogger(SERVICES.HF_SPACES);
 // GOOGLE AUTHENTICATION
 // ============================================================
 
+function sanitizePemKey(raw) {
+    if (!raw) throw new Error('GOOGLE_PRIVATE_KEY kosong');
+    
+    let key = raw.trim();
+    
+    // Remove surrounding quotes jika ada (kadang secret disimpan dengan quotes)
+    if ((key.startsWith('"') && key.endsWith('"')) || 
+        (key.startsWith("'") && key.endsWith("'"))) {
+        key = key.slice(1, -1);
+    }
+    
+    // Normalize newline variants
+    key = key.replace(/\\n/g, '\n');      // escaped newline ke actual newline
+    key = key.replace(/\r\n/g, '\n');    // CRLF ke LF
+    key = key.replace(/\r/g, '\n');      // CR ke LF
+    
+    // Remove extra whitespace per line
+    const lines = key.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+    key = lines.join('\n');
+    
+    // Validate structure
+    if (!key.includes('-----BEGIN PRIVATE KEY-----')) {
+        throw new Error('PEM header hilang setelah sanitasi');
+    }
+    if (!key.includes('-----END PRIVATE KEY-----')) {
+        throw new Error('PEM footer hilang setelah sanitasi');
+    }
+    
+    return key;
+}
+
 async function getGoogleToken(env) {
     const cacheKey = "google_oauth_token";
     try {
@@ -46,20 +77,20 @@ async function getGoogleToken(env) {
     }
 
     const now = Math.floor(Date.now() / 1000);
-    let pemKey = env.GOOGLE_PRIVATE_KEY;
+    const rawKey = env.GOOGLE_PRIVATE_KEY;
     
-    // Handle berbagai format GOOGLE_PRIVATE_KEY:
-    // 1. Dari wrangler secret: biasanya ada \\n literal (escaped newline)
-    // 2. Dari environment variable: ada \n actual newline
-    // 3. Dari JSON langsung: ada \n actual newline
-    if (pemKey.includes('\\n')) {
-        pemKey = pemKey.replace(/\\n/g, '\n');
-    }
+    // Diagnostic logging (non-sensitive)
+    googleLog.info('GOOGLE_PRIVATE_KEY diagnostic', {
+        exists: !!rawKey,
+        length: rawKey ? rawKey.length : 0,
+        hasLiteralBackslashN: rawKey ? rawKey.includes('\\n') : false,
+        hasActualNewline: rawKey ? rawKey.includes('\n') : false,
+        hasHeader: rawKey ? rawKey.includes('-----BEGIN PRIVATE KEY-----') : false,
+        hasFooter: rawKey ? rawKey.includes('-----END PRIVATE KEY-----') : false
+    });
     
-    // Validasi: Pastikan ada header/footer PEM yang benar
-    if (!pemKey.includes('-----BEGIN PRIVATE KEY-----')) {
-        throw new Error('GOOGLE_PRIVATE_KEY tidak valid: tidak ditemukan header "BEGIN PRIVATE KEY". Pastikan format PEM benar.');
-    }
+    // Sanitasi ekstrem
+    const pemKey = sanitizePemKey(rawKey);
     
     let privateKey;
     try {

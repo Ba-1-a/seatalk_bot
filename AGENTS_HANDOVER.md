@@ -27,6 +27,7 @@ SeaTalk bot with screenshot pipeline using Google Sheets -> PDF -> PNG -> SeaTal
 - [x] Fix group chat screenshot execution
 - [x] Implement spam-resistant rate limiting  
 - [x] Fix auto-thread reply for long responses
+- [ ] Fix screenshot Range Panjang
 - [ ] Scheduling screenshot (auto-report)
 - [ ] Sheet context understanding untuk AI
 
