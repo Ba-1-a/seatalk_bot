@@ -244,39 +244,58 @@ async function downloadPdfWithAuth(exportUrl, accessToken, reqId) {
 
 /**
  * Render PDF buffer to PNG using Puppeteer
- * Uses temp file approach to avoid base64 memory overhead
+ * Uses temp file and HTML wrapper approach to prevent frame detachment
  */
 async function renderPdfToPng(pdfBuffer, options, reqId) {
   const {
     scale = 2.5,
     max_pages = 5,
-    device_scale_factor = 2.5,
-    render_delay_ms = 500
+    device_scale_factor: deviceScaleFactor = 2.5,
+    render_delay_ms = 1000
   } = options;
 
   console.log(`[${reqId}] renderPdfToPng: scale=${scale}, max_pages=${max_pages}`);
 
   let browser = null;
   let tempFilePath = null;
+  let htmlFilePath = null;
 
   try {
-    // 1. Write PDF to temp file (avoid base64 memory overhead)
+    // 1. Write PDF to temp file
     const tempDir = os.tmpdir();
     tempFilePath = path.join(tempDir, `sheet_${Date.now()}.pdf`);
     await fs.writeFile(tempFilePath, Buffer.from(pdfBuffer));
     console.log(`[${reqId}] PDF written to: ${tempFilePath}`);
 
-    // 2. Launch Chromium with container-safe arguments
+    // 2. Create HTML wrapper using standard embed/iframe or object with fallback
+    htmlFilePath = path.join(tempDir, `viewer_${Date.now()}.html`);
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+          <style>
+              html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #ffffff; overflow: hidden; }
+              embed { width: 100%; height: 100%; border: none; }
+          </style>
+      </head>
+      <body>
+          <embed src="file://${tempFilePath}" type="application/pdf" width="100%" height="100%">
+      </body>
+      </html>
+    `;
+    await fs.writeFile(htmlFilePath, htmlContent);
+
+    // 3. Launch Chromium with container-safe arguments
     browser = await puppeteer.launch({
       headless: 'new',
       args: [
-        '--no-sandbox',                    // Required for container/linux
-        '--disable-setuid-sandbox',        // Required for container/linux
-        '--disable-dev-shm-usage',         // Avoid /dev/shm issues in containers
-        '--disable-gpu',                   // GPU not needed for PDF render
-        '--single-process',                // Memory optimization for 16GB container
-        '--disable-web-security',          // Allow file:// protocol
-        '--allow-file-access-from-files',  // Allow file:// access
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--single-process',
+        '--disable-web-security',
+        '--allow-file-access-from-files',
         '--disable-extensions',
         '--disable-translate',
         '--disable-background-networking',
@@ -294,22 +313,22 @@ async function renderPdfToPng(pdfBuffer, options, reqId) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor });
 
-    // 3. Open PDF from temp file (NOT base64 data URL)
-    const fileUrl = `file://${tempFilePath}`;
-    console.log(`[${reqId}] Opening: ${fileUrl}`);
+    // 4. Open HTML wrapper file using domcontentloaded to prevent detachment timeout
+    const fileUrl = `file://${htmlFilePath}`;
+    console.log(`[${reqId}] Opening HTML viewer: ${fileUrl}`);
     
     await page.goto(fileUrl, { 
-      waitUntil: 'networkidle0',
+      waitUntil: 'domcontentloaded', 
       timeout: REQUEST_TIMEOUT 
     });
     
-    console.log(`[${reqId}] PDF loaded successfully`);
+    console.log(`[${reqId}] PDF viewer loaded successfully`);
 
-    // 4. Wait for PDF to fully render
+    // 5. Wait longer for PDF internal plugin viewer to paint the canvas/pages
     console.log(`[${reqId}] Waiting ${render_delay_ms}ms for render...`);
     await new Promise(resolve => setTimeout(resolve, render_delay_ms));
 
-    // 5. Take screenshot
+    // 6. Take screenshot
     console.log(`[${reqId}] Taking screenshot...`);
     const screenshot = await page.screenshot({
       type: 'png',
@@ -331,24 +350,15 @@ async function renderPdfToPng(pdfBuffer, options, reqId) {
     console.error(`[${reqId}] Rendering error:`, err.message);
     throw new Error(`PDF rendering failed: ${err.message}`);
   } finally {
-    // 6. Cleanup temp file
+    // 7. Cleanup temp files and browser
     if (tempFilePath) {
-      try {
-        await fs.unlink(tempFilePath);
-        console.log(`[${reqId}] Temp file deleted: ${tempFilePath}`);
-      } catch (unlinkErr) {
-        console.error(`[${reqId}] Failed to delete temp file:`, unlinkErr.message);
-      }
+      try { await fs.unlink(tempFilePath); } catch (e) {}
     }
-
-    // 7. Close browser
+    if (htmlFilePath) {
+      try { await fs.unlink(htmlFilePath); } catch (e) {}
+    }
     if (browser) {
-      try {
-        await browser.close();
-        console.log(`[${reqId}] Browser closed`);
-      } catch (closeErr) {
-        console.error(`[${reqId}] Browser close error:`, closeErr.message);
-      }
+      try { await browser.close(); } catch (e) {}
     }
   }
 }

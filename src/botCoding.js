@@ -70,7 +70,7 @@ function detectScreenshotIntent(text) {
  * @param {String} threadId - ID thread
  * @param {String} originalMessageId - ID pesan original
  */
-export async function handleGeneralChat(env, targetId, text, isGroup, threadId, originalMessageId, ctx = null) {
+export async function handleGeneralChat(env, targetId, text, isGroup, threadId, originalMessageId, ctx) {
   try {
     // ================================================================
     // INTENT DETECTION: Deteksi natural language command
@@ -94,7 +94,7 @@ export async function handleGeneralChat(env, targetId, text, isGroup, threadId, 
         
         // Screenshot synchronous (tidak pakai ctx.waitUntil karena timeout 15 detik)
         // Dedup key di index.js sudah handle SeaTalk retry
-        await handleScreenshotCommand(env, targetId, cleanedText, isGroup, threadId, originalMessageId);
+        await handleScreenshotCommand(env, targetId, cleanedText, isGroup, threadId, originalMessageId, ctx);
         return;
       } else {
         // Tidak ada sheet default, beri tahu user cara set
