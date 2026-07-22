@@ -15,6 +15,7 @@ const puppeteer = require('puppeteer');
 const fs = require('fs/promises');
 const path = require('path');
 const os = require('os');
+const sharp = require('sharp');
 
 const app = express();
 
@@ -292,6 +293,7 @@ async function renderPdfToPng(pdfBuffer, options, reqId) {
         '--no-sandbox',
         '--disable-setuid-sandbox',
         '--disable-dev-shm-usage',
+        '--no-zygote',
         '--disable-gpu',
         '--single-process',
         '--disable-web-security',
@@ -344,7 +346,14 @@ async function renderPdfToPng(pdfBuffer, options, reqId) {
     await page.close();
     console.log(`[${reqId}] Screenshot captured: ${screenshot.length} bytes`);
 
-    return screenshot;
+    // 6a. Auto-crop whitespace margins with sharp
+    console.log(`[${reqId}] Auto-cropping whitespace...`);
+    const croppedBuffer = await sharp(screenshot)
+      .trim({ background: { r: 255, g: 255, b: 255 } })
+      .toBuffer();
+
+    console.log(`[${reqId}] Cropped screenshot: ${croppedBuffer.length} bytes`);
+    return croppedBuffer;
 
   } catch (err) {
     console.error(`[${reqId}] Rendering error:`, err.message);

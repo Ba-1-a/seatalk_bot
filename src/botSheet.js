@@ -290,39 +290,47 @@ async function renderViaHfSpaces(exportUrl, googleAccessToken, env) {
     
     hfLog.info('Calling HF Spaces for rendering', { url: HF_URL });
     
-    const response = await fetch(`${HF_URL}/render`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${HF_TOKEN}`,
-            'X-Project-ID': 'seatalk_bot'
-        },
-        body: JSON.stringify({
-            sheet_url: exportUrl,
-            google_access_token: googleAccessToken,
-            render_options: {
-                scale: 2.5,
-                max_pages: 5,
-                device_scale_factor: 2.5
-            }
-        }),
-        signal: AbortSignal.timeout(120000) // 2 menit timeout
-    });
-    
-    if (!response.ok) {
-        const errText = await response.text().catch(() => 'Unknown error');
-        hfLog.error('HF Spaces render failed', { status: response.status, body: errText.substring(0, 300) });
-        throw new Error(`HF Spaces error: HTTP ${response.status} - ${errText.substring(0, 100)}`);
+    try {
+        const response = await fetch(`${HF_URL}/render`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${HF_TOKEN}`,
+                'X-Project-ID': 'seatalk_bot'
+            },
+            body: JSON.stringify({
+                sheet_url: exportUrl,
+                google_access_token: googleAccessToken,
+                render_options: {
+                    scale: 2.5,
+                    max_pages: 5,
+                    device_scale_factor: 2.5
+                }
+            }),
+            signal: AbortSignal.timeout(25000) // 25 detik timeout agar waitUntil tidak tertunda
+        });
+        
+        if (!response.ok) {
+            const errText = await response.text().catch(() => 'Unknown error');
+            hfLog.error('HF Spaces render failed', { status: response.status, body: errText.substring(0, 300) });
+            throw new Error(`HF Spaces error: HTTP ${response.status} - ${errText.substring(0, 100)}`);
+        }
+        
+        const pngBuffer = await response.arrayBuffer();
+        hfLog.info('PNG received from HF Spaces', { sizeBytes: pngBuffer.byteLength });
+        
+        if (pngBuffer.byteLength < 100) {
+            throw new Error("PNG hasil render terlalu kecil/rusak.");
+        }
+        
+        return pngBuffer;
+    } catch (err) {
+        if (err.name === 'TimeoutError' || err.message.includes('timeout')) {
+            hfLog.warn('HF Spaces render timeout', { error: err.message });
+            throw new Error('Render timeout, please try again in a moment.');
+        }
+        throw err;
     }
-    
-    const pngBuffer = await response.arrayBuffer();
-    hfLog.info('PNG received from HF Spaces', { sizeBytes: pngBuffer.byteLength });
-    
-    if (pngBuffer.byteLength < 100) {
-        throw new Error("PNG hasil render terlalu kecil/rusak.");
-    }
-    
-    return pngBuffer;
 }
 
 // ============================================================
