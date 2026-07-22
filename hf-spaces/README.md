@@ -1,3 +1,16 @@
+---
+title: B-Cube Tech Screenshot Bot
+emoji: 📸
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
+# B-Cube Tech Screenshot Bot
+Space ini digunakan untuk menjalankan service screenshot bot.
+
 # HF Spaces - Puppeteer Screenshot API
 
 Hugging Face Space untuk render PDF-to-PNG menggunakan Puppeteer/Chromium.
