@@ -35,3 +35,6 @@ HF_SPACES_URL = "https://ba-1-a-b-cube-tech.hf.space"
 # - GOOGLE_PRIVATE_KEY
 # - SUPABASE_SERVICE_ROLE_KEY
 # - HF_API_KEY (Bearer token untuk akses HF Spaces)
+
+[triggers]
+crons = ["*/15 * * * *"]

@@ -334,90 +334,115 @@ async function renderViaHfSpaces(exportUrl, googleAccessToken, env) {
 }
 
 // ============================================================
-// ASYNC SCREENSHOT HANDLER (ctx.waitUntil)
+// SUPABASE QUEUE INSERTION (Async Architecture)
+// ============================================================
+
+async function insertToQueue(env, payload) {
+  const url = `${env.SUPABASE_URL}/rest/v1/screenshot_queue`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'apikey': env.SUPABASE_SERVICE_ROLE_KEY,
+      'Authorization': `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY}`,
+      'Prefer': 'return=minimal'
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    const err = await res.text();
+    throw new Error(`Queue insert failed: ${res.status}`);
+  }
+}
+
+// ============================================================
+// ASYNC SCREENSHOT HANDLER (Queue-based)
 // ============================================================
 
 export async function handleScreenshotCommand(env, targetId, text, isGroup, threadId, originalMessageId, ctx) {
-    const reqId = crypto.randomUUID().slice(0, 8);
-    const log = googleLog.child({ reqId, targetId, isGroup });
-    
-    log.enter('handleScreenshotCommand', { text: text.substring(0, 50) });
-    
-    const args = text.replace(/^\S+\s*/, "").trim();
-    const tokens = args.split(/\s+/).filter(Boolean);
-    
-    const rateLimitResult = await checkScreenshotRateLimit(env, targetId, isGroup, reqId);
-    if (!rateLimitResult.allowed) {
-        return await replyToUser(env, rateLimitResult.message, targetId, isGroup, threadId, originalMessageId);
-    }
-    
-    await replyToUser(env, "⏳ Memproses screenshot...", targetId, isGroup, threadId, originalMessageId);
-    
-    const explicitSheetId = extractSpreadsheetId(args) || (tokens[0] && extractSpreadsheetId(tokens[0]));
-    const storedSheetId = await env.BOT_MEMORY.get(`default_sheet_${targetId}`);
-    const sheetId = explicitSheetId || storedSheetId;
-    
-    if (!sheetId) {
-        await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
-        return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, threadId, originalMessageId);
-    }
-    
-    let tabName = "";
-    let customRange = null;
-    
-    const tokensForTabAndRange = explicitSheetId
-        ? tokens.filter(token => !extractSpreadsheetId(token) && !/^url=/i.test(token))
-        : tokens;
-    
-    for (let token of tokensForTabAndRange) {
-        if (!token) continue;
-        const tabMatch = token.match(/^tab_name=(.+)$/i);
-        if (tabMatch) { tabName = tabMatch[1]; continue; }
-        
-        const rangeParsed = parseCustomRange(token);
-        if (rangeParsed) { customRange = rangeParsed; continue; }
-        
-        if (!/^\/screenshot$/.test(token)) tabName += (tabName ? " " : "") + token;
-    }
-    
-    let rangeIndices = null;
-    if (customRange) {
-        rangeIndices = parseA1RangeToIndices(customRange);
-        log.info('Custom range parsed', { customRange, rangeIndices });
-    }
-    
-    log.decision('Starting background render');
-    ctx.waitUntil(
-        renderAndSendAsync(env, targetId, isGroup, threadId, originalMessageId, sheetId, tabName, rangeIndices, reqId)
-    );
-    
-    return;
-}
+  const reqId = crypto.randomUUID().slice(0, 8);
+  const log = googleLog.child({ reqId, targetId, isGroup });
 
-async function renderAndSendAsync(env, targetId, isGroup, threadId, originalMessageId, sheetId, tabName, rangeIndices, reqId) {
-    const log = googleLog.child({ reqId, targetId, isGroup });
-    
-    try {
-        log.decision('Getting Google token');
-        const googleToken = await getGoogleToken(env);
-        
-        log.decision('Generating export URL');
-        const exportUrl = generateGoogleExportUrl(sheetId, tabName, rangeIndices, env);
-        
-        log.decision('Calling HF Spaces');
-        const pngBuffer = await renderViaHfSpaces(exportUrl, googleToken, env);
-        
-        log.decision('Sending PNG to SeaTalk');
-        await sendScreenshotToUser(env, pngBuffer, targetId, isGroup, threadId, originalMessageId);
-        
-        log.info('Screenshot completed', { sizeBytes: pngBuffer.byteLength });
-        
-    } catch (err) {
-        log.error('Background render failed', { error: err.message });
-        await replyToUser(env, `❌ Gagal membuat screenshot: ${err.message}`, targetId, isGroup, threadId, originalMessageId);
-    } finally {
-        await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
-    }
+  const args = text.replace(/^\S+\s*/, "").trim();
+  const tokens = args.split(/\s+/).filter(Boolean);
+
+  const rateLimitResult = await checkScreenshotRateLimit(env, targetId, isGroup, reqId);
+  if (!rateLimitResult.allowed) {
+    return await replyToUser(env, rateLimitResult.message, targetId, isGroup, threadId, originalMessageId);
+  }
+
+  // 1. Immediate reply
+  await replyToUser(env, "⏳ Screenshot queued. Rendering in background...", targetId, isGroup, threadId, originalMessageId);
+
+  const explicitSheetId = extractSpreadsheetId(args) || (tokens[0] && extractSpreadsheetId(tokens[0]));
+  const storedSheetId = await env.BOT_MEMORY.get(`default_sheet_${targetId}`);
+  const sheetId = explicitSheetId || storedSheetId;
+
+  if (!sheetId) {
+    await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
+    return await replyToUser(env, "⚠️ Sheet tidak ditemukan. Gunakan /setsheet <url> terlebih dahulu.", targetId, isGroup, threadId, originalMessageId);
+  }
+
+  // Parse options
+  let tabName = "";
+  let customRange = null;
+  const tokensForTabAndRange = explicitSheetId
+    ? tokens.filter(token => !extractSpreadsheetId(token) && !/^url=/i.test(token))
+    : tokens;
+
+  for (const token of tokensForTabAndRange) {
+    if (!token) continue;
+    const tabMatch = token.match(/^tab_name=(.+)$/i);
+    if (tabMatch) { tabName = tabMatch[1]; continue; }
+    const rangeParsed = parseCustomRange(token);
+    if (rangeParsed) { customRange = rangeParsed; continue; }
+    if (!/^\/screenshot$/.test(token)) tabName += (tabName ? " " : "") + token;
+  }
+
+  let rangeIndices = null;
+  if (customRange) {
+    rangeIndices = parseA1RangeToIndices(customRange);
+  }
+
+  const exportUrl = generateGoogleExportUrl(sheetId, tabName, rangeIndices, env);
+  const googleToken = await getGoogleToken(env);
+
+  // 2. Insert job into Supabase queue
+  const jobPayload = {
+    sheet_url: exportUrl,
+    target_id: targetId,
+    is_group: isGroup,
+    seatalk_app_id: env.SEATALK_APP_ID,
+    seatalk_app_secret: env.SEATALK_APP_SECRET,
+    status: 'pending'
+  };
+
+  try {
+    await insertToQueue(env, jobPayload);
+    log.info('Job queued', { sheetId, targetId });
+  } catch (err) {
+    log.error('Queue insert failed', { error: err.message });
+    await replyToUser(env, `❌ Gagal mengantrikan screenshot: ${err.message}`, targetId, isGroup, threadId, originalMessageId);
+    await clearScreenshotRateLimit(env, targetId, isGroup, reqId);
+    return;
+  }
+
+  // 3. Wake HF Spaces (non-blocking)
+  ctx.waitUntil(
+    fetch(`${env.HF_SPACES_URL}/wakeup`, {
+      signal: AbortSignal.timeout(5000)
+    }).catch(e => log.warn('HF wakeup failed', { error: e.message }))
+  );
+
+  // 4. Extend rate limit for async processing (5 min)
+  await env.BOT_MEMORY.put(
+    `screenshot_processing_${isGroup ? 'group' : 'user'}_${targetId}`,
+    '1',
+    { expirationTtl: 300 }
+  );
+
+  return;
 }
 
 // ============================================================

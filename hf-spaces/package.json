@@ -1,17 +1,14 @@
 {
-  "name": "hf-spaces-puppeteer",
-  "version": "1.0.0",
-  "description": "Puppeteer screenshot API for Hugging Face Spaces",
+  "name": "hf-spaces-renderer",
+  "version": "2.0.0",
   "main": "api/index.js",
   "scripts": {
-    "start": "node api/index.js",
-    "dev": "node --watch api/index.js"
+    "start": "node api/index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "puppeteer": "^21.0.0",
-    "pdfjs-dist": "^3.11.174",
-    "sharp": "^0.33.0"
+    "sharp": "^0.33.0",
+    "@supabase/supabase-js": "^2.39.0"
   },
   "engines": {
     "node": ">=18.0.0"

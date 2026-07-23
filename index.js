@@ -81,6 +81,7 @@ export default {
       if (!env.SEATALK_APP_SECRET) missingSecrets.push('SEATALK_APP_SECRET');
       if (!env.GOOGLE_PRIVATE_KEY) missingSecrets.push('GOOGLE_PRIVATE_KEY');
       if (!env.GOOGLE_CLIENT_EMAIL) missingSecrets.push('GOOGLE_CLIENT_EMAIL');
+      if (!env.SUPABASE_SERVICE_ROLE_KEY) missingSecrets.push('SUPABASE_SERVICE_ROLE_KEY');
       if (missingSecrets.length > 0) {
         reqLog.error('Missing required secrets', { missing: missingSecrets });
         return new Response(JSON.stringify({ error: 'Server misconfigured', missing: missingSecrets }), { status: 500, headers: { 'Content-Type': 'application/json' } });

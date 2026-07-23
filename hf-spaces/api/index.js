@@ -1,396 +1,324 @@
 /**
- * api/index.js
- * Hugging Face Spaces - Centralized Rendering API
- * Multi-project support via Bearer token
- * Architecture: Worker sends sheet_url + google_access_token
- *               HF Spaces downloads PDF, renders PNG, returns binary
- * 
- * ENDPOINTS:
- * - POST /render - Render Google Sheet to PNG
- * - GET /health - Health check
+ * hf-spaces/api/index.js
+ * Hugging Face Spaces - Background Renderer
+ * Architecture: Queue-based async processing with pdftoppm + sharp
  */
 
 const express = require('express');
-const puppeteer = require('puppeteer');
+const { createClient } from '@supabase/supabase-js';
+const sharp = require('sharp');
+const { exec } = require('child_process/promises');
 const fs = require('fs/promises');
 const path = require('path');
 const os = require('os');
-const sharp = require('sharp');
 
 const app = express();
+app.use(express.json({ limit: '50mb' }));
 
 // ============================================================
 // CONFIGURATION
 // ============================================================
 const PORT = process.env.PORT || 7860;
-const MAX_PDF_SIZE = 50 * 1024 * 1024; // 50MB limit
-const REQUEST_TIMEOUT = 120000; // 2 minutes for large PDFs
+const CONCURRENCY = 2;
 
-// ============================================================
-// MULTI-PROJECT TOKEN CONFIGURATION
-// ============================================================
-// 1 akun HF, multiple projects
-// Format: { "<bearer_token>": "<project_id>" }
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
 const PROJECT_TOKENS = {
-  [process.env.TOKEN_SEATALK || 'seatalk_token_123']: 'seatalk_bot',
-  // Add more projects here:
-  // [process.env.TOKEN_PROJECT_B]: 'project_b',
-  // [process.env.TOKEN_PROJECT_C]: 'project_c',
+  [process.env.TOKEN_SEATALK || 'seatalk_token_123']: 'seatalk_bot'
 };
 
-// ============================================================
-// MIDDLEWARE
-// ============================================================
-app.use(express.json({ limit: '50mb' }));
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+  console.error('[FATAL] Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY');
+  process.exit(1);
+}
 
-// Multi-project Bearer token validation
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+
+// ============================================================
+// SeaTalk Token Cache (prevents rate limit)
+// ============================================================
+let cachedSeaTalkToken = null;
+let tokenExpiration = 0;
+
+async function getSeaTalkAccessToken(appId, appSecret) {
+  if (cachedSeaTalkToken && Date.now() < tokenExpiration - 30000) {
+    return cachedSeaTalkToken;
+  }
+
+  const response = await fetch('https://openapi.seatalk.io/auth/app_access_token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ app_id: appId, app_secret: appSecret })
+  });
+
+  const data = await response.json();
+  if (!data.access_token) {
+    throw new Error(`SeaTalk auth failed: ${JSON.stringify(data)}`);
+  }
+
+  cachedSeaTalkToken = data.access_token;
+  tokenExpiration = Date.now() + (7000 * 1000); // ~2 hours
+  console.log(`[AUTH] New SeaTalk token cached, expires at ${new Date(tokenExpiration).toISOString()}`);
+  return data.access_token;
+}
+
+// ============================================================
+// SeaTalk Image Upload (native FormData, Node.js 20+)
+// ============================================================
+async function uploadImageToSeaTalk(accessToken, imageBuffer) {
+  const form = new FormData();
+  form.append('file', new Blob([imageBuffer], { type: 'image/png' }), 'screenshot.png');
+
+  const response = await fetch('https://openapi.seatalk.io/auth/v2/file/upload', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`
+      // NO Content-Type: fetch sets it automatically with boundary
+    },
+    body: form
+  });
+
+  const data = await response.json();
+  if (!data.file_code) {
+    throw new Error(`SeaTalk upload failed: ${JSON.stringify(data)}`);
+  }
+  return data.file_code;
+}
+
+async function sendImageMessage(accessToken, targetId, isGroup, fileCode) {
+  const endpoint = isGroup
+    ? 'https://openapi.seatalk.io/messaging/v2/group_chat'
+    : 'https://openapi.seatalk.io/messaging/v2/single_chat';
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      [isGroup ? 'group_id' : 'employee_code']: targetId,
+      message: {
+        image: { file_code: fileCode }
+      }
+    })
+  });
+
+  const data = await response.json();
+  if (data.error_code !== 0) {
+    throw new Error(`SeaTalk message failed: ${JSON.stringify(data)}`);
+  }
+  return data;
+}
+
+async function sendToSeaTalk(seatalkAppId, seatalkAppSecret, targetId, isGroup, imageBuffer) {
+  const accessToken = await getSeaTalkAccessToken(seatalkAppId, seatalkAppSecret);
+  const fileCode = await uploadImageToSeaTalk(accessToken, imageBuffer);
+  await sendImageMessage(accessToken, targetId, isGroup, fileCode);
+  return fileCode;
+}
+
+// ============================================================
+// AUTH Middleware (for manual override/token validation)
+// ============================================================
 function requireProjectToken(req, res, next) {
   const authHeader = req.headers.authorization;
-
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({
-      error: 'Unauthorized',
-      detail: 'Missing or invalid Authorization header. Use: Authorization: Bearer <token>'
-    });
+    return res.status(401).json({ error: 'Unauthorized' });
   }
-
   const token = authHeader.slice(7);
   const projectId = PROJECT_TOKENS[token];
-
   if (!projectId) {
-    return res.status(403).json({
-      error: 'Invalid token',
-      detail: 'Token not recognized. Check TOKEN_SEATALK environment variable.',
-      hint: 'Ensure Worker sends correct Bearer token'
-    });
+    return res.status(403).json({ error: 'Invalid token' });
   }
-
-  // Attach project info to request
   req.projectId = projectId;
-  req.apiKey = token;
-  
-  console.log(`[${new Date().toISOString()}] [AUTH] Authenticated: project=${projectId}`);
-  
   next();
 }
 
 // ============================================================
-// ROUTES
+// Wakeup Endpoint (Triggered by CF Worker)
 // ============================================================
-
-/**
- * Health check endpoint
- * GET /health
- */
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    service: 'hf-spaces-renderer',
-    timestamp: new Date().toISOString(),
-    memory: process.memoryUsage(),
-    uptime: process.uptime(),
-    projects: Object.keys(PROJECT_TOKENS).length
-  });
+app.get('/wakeup', (req, res) => {
+  console.log(`[${new Date().toISOString()}] [WAKEUP] Triggered`);
+  setImmediate(() => processQueue().catch(err => {
+    console.error('[WAKEUP] Queue processing error:', err);
+  }));
+  res.json({ status: 'wakeup_received' });
 });
 
-/**
- * Main render endpoint - NEW Architecture
- * POST /render
- * Body: {
- *   sheet_url: "<Google Sheets export URL>",
- *   google_access_token: "<OAuth token>",
- *   render_options: { scale, max_pages, ... }
- * }
- * Headers: Authorization: Bearer <TOKEN_SEATALK>
- * Response: image/png (binary)
- */
-app.post('/render', requireProjectToken, async (req, res) => {
+// ============================================================
+// Queue Processor
+// ============================================================
+async function processQueue() {
   const startTime = Date.now();
-  const reqId = `${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
-  const projectId = req.projectId;
-  
-  console.log(`[${new Date().toISOString()}] [${reqId}] Render request from project=${projectId}`);
 
-  try {
-    // 1. Validate payload
-    const { sheet_url, google_access_token, render_options } = req.body;
+  const { data: jobs, error } = await supabase
+    .from('screenshot_queue')
+    .select('*')
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(CONCURRENCY);
 
-    if (!sheet_url) {
-      return res.status(400).json({
-        error: 'sheet_url required',
-        requestId: reqId
-      });
-    }
-
-    if (!google_access_token) {
-      return res.status(400).json({
-        error: 'google_access_token required (for private sheets)',
-        requestId: reqId
-      });
-    }
-
-    console.log(`[${reqId}] Rendering: ${sheet_url.substring(0, 120)}...`);
-
-    // 2. Download PDF from Google Sheets with OAuth token
-    console.log(`[${reqId}] Downloading PDF from Google...`);
-    const pdfBuffer = await downloadPdfWithAuth(sheet_url, google_access_token, reqId);
-    const pdfSizeMB = (pdfBuffer.byteLength / 1024 / 1024).toFixed(2);
-    
-    console.log(`[${reqId}] PDF downloaded: ${pdfBuffer.byteLength} bytes (${pdfSizeMB} MB)`);
-
-    if (pdfBuffer.byteLength < 200) {
-      return res.status(400).json({
-        error: 'PDF too small (sheet might be empty)',
-        requestId: reqId
-      });
-    }
-
-    // 3. Render PDF to PNG
-    console.log(`[${reqId}] Rendering PDF to PNG...`);
-    const pngBuffer = await renderPdfToPng(pdfBuffer, render_options || {}, reqId);
-    const pngSizeMB = (pngBuffer.byteLength / 1024 / 1024).toFixed(2);
-    
-    const processingTime = Date.now() - startTime;
-    console.log(`[${reqId}] Render complete: ${pngBuffer.byteLength} bytes (${pngSizeMB} MB) in ${processingTime}ms`);
-
-    // 4. Return binary PNG
-    res.set({
-      'Content-Type': 'image/png',
-      'Content-Length': pngBuffer.length,
-      'X-Processing-Time': `${processingTime}ms`,
-      'X-PDF-Size': `${pdfSizeMB}MB`,
-      'X-PNG-Size': `${pngSizeMB}MB`,
-      'X-Request-Id': reqId,
-      'X-Project': projectId
-    });
-    
-    return res.send(Buffer.from(pngBuffer));
-
-  } catch (err) {
-    const processingTime = Date.now() - startTime;
-    console.error(`[${reqId}] Render failed after ${processingTime}ms:`, err.message);
-    
-    res.status(500).json({
-      error: 'Rendering failed',
-      detail: err.message,
-      requestId: reqId,
-      processingTime: `${processingTime}ms`
-    });
+  if (error || !jobs || jobs.length === 0) {
+    console.log('[QUEUE] No pending jobs');
+    return;
   }
-});
 
-/**
- * Legacy endpoint (for backward compatibility)
- * POST /screenshot
- * Body: { pdf_base64: "...", render_options: {...} }
- */
-app.post('/screenshot', requireProjectToken, async (req, res) => {
-  console.log(`[${new Date().toISOString()}] [LEGACY] /screenshot endpoint called (use /render instead)`);
-  
-  try {
-    const { pdf_base64, render_options } = req.body;
+  const jobIds = jobs.map(j => j.id);
 
-    if (!pdf_base64) {
-      return res.status(400).json({ error: 'Missing pdf_base64' });
-    }
+  await supabase
+    .from('screenshot_queue')
+    .update({ status: 'processing' })
+    .in('id', jobIds);
 
-    const pdfBuffer = Buffer.from(pdf_base64, 'base64');
-    const reqId = `${Math.random().toString(36).slice(2, 10)}-${Date.now().toString(36)}`;
-    
-    console.log(`[${reqId}] Legacy render: ${pdfBuffer.length} bytes`);
-    
-    const pngBuffer = await renderPdfToPng(pdfBuffer, render_options || {}, reqId);
-    
-    res.set({
-      'Content-Type': 'image/png',
-      'Content-Length': pngBuffer.length,
-      'X-Request-Id': reqId
-    });
-    
-    return res.send(Buffer.from(pngBuffer));
+  console.log(`[QUEUE] Processing ${jobs.length} jobs`);
+  await Promise.allSettled(
+    jobs.map(job => processJob(job).catch(err => {
+      console.error(`[JOB:${job.id.slice(0,8)}] Error:`, err.message);
+    }))
+  );
 
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] [LEGACY] Error:`, err.message);
-    res.status(500).json({
-      error: err.message || 'Internal server error'
-    });
-  }
-});
+  console.log(`[QUEUE] Batch completed in ${Date.now() - startTime}ms`);
+}
 
 // ============================================================
-// HELPER FUNCTIONS
+// Job Processor
 // ============================================================
+async function processJob(job) {
+  const { id, sheet_url, target_id, is_group, seatalk_app_id, seatalk_app_secret } = job;
 
-/**
- * Download PDF from Google Sheets export URL with OAuth token
- */
-async function downloadPdfWithAuth(exportUrl, accessToken, reqId) {
-  console.log(`[${reqId}] Fetching: ${exportUrl.substring(0, 120)}...`);
-  
-  const response = await fetch(exportUrl, {
-    headers: {
-      'Authorization': `Bearer ${accessToken}`
-    }
-  });
+  try {
+    const pdfBuffer = await downloadPdf(sheet_url);
+    console.log(`[JOB:${id.slice(0,8)}] PDF: ${(pdfBuffer.byteLength/1024/1024).toFixed(2)}MB`);
 
-  if (!response.ok) {
-    const errText = await response.text().catch(() => 'Unknown error');
-    console.error(`[${reqId}] Google download failed: ${response.status} - ${errText.substring(0, 200)}`);
-    throw new Error(`Google PDF download failed: HTTP ${response.status}`);
+    const trimmedBuffer = await renderPdfWithPoppler(pdfBuffer);
+
+    await sendToSeaTalk(seatalk_app_id, seatalk_app_secret, target_id, is_group, trimmedBuffer);
+    console.log(`[JOB:${id.slice(0,8)}] Delivered to SeaTalk`);
+
+    await supabase
+      .from('screenshot_queue')
+      .update({ status: 'completed', processed_at: new Date().toISOString() })
+      .eq('id', id);
+
+  } catch (err) {
+    console.error(`[JOB:${id.slice(0,8)}] Failed:`, err.message);
+    await supabase
+      .from('screenshot_queue')
+      .update({ status: 'failed', processed_at: new Date().toISOString() })
+      .eq('id', id);
   }
+}
 
+// ============================================================
+// PDF Download
+// ============================================================
+async function downloadPdf(exportUrl) {
+  const response = await fetch(exportUrl);
+  if (!response.ok) throw new Error(`PDF download failed: HTTP ${response.status}`);
   const buffer = await response.arrayBuffer();
+  if (buffer.byteLength < 200) throw new Error('PDF too small');
   return buffer;
 }
 
-/**
- * Render PDF buffer to PNG using Puppeteer
- * Uses temp file and HTML wrapper approach to prevent frame detachment
- */
-async function renderPdfToPng(pdfBuffer, options, reqId) {
-  const {
-    scale = 2.5,
-    max_pages = 5,
-    device_scale_factor: deviceScaleFactor = 2.5,
-    render_delay_ms = 1000
-  } = options;
-
-  console.log(`[${reqId}] renderPdfToPng: scale=${scale}, max_pages=${max_pages}`);
-
-  let browser = null;
-  let tempFilePath = null;
-  let htmlFilePath = null;
+// ============================================================
+// pdftoppm + sharp (proper metadata-based stitching)
+// ============================================================
+async function renderPdfWithPoppler(pdfBuffer) {
+  const tempDir = os.tmpdir();
+  const timestamp = Date.now();
+  const pdfFile = path.join(tempDir, `input_${timestamp}.pdf`);
+  const outputPrefix = path.join(tempDir, `page_${timestamp}`);
 
   try {
-    // 1. Write PDF to temp file
-    const tempDir = os.tmpdir();
-    tempFilePath = path.join(tempDir, `sheet_${Date.now()}.pdf`);
-    await fs.writeFile(tempFilePath, Buffer.from(pdfBuffer));
-    console.log(`[${reqId}] PDF written to: ${tempFilePath}`);
+    await fs.writeFile(pdfFile, Buffer.from(pdfBuffer));
 
-    // 2. Create HTML wrapper using standard embed/iframe or object with fallback
-    htmlFilePath = path.join(tempDir, `viewer_${Date.now()}.html`);
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-          <style>
-              html, body { margin: 0; padding: 0; width: 100%; height: 100%; background: #ffffff; overflow: hidden; }
-              embed { width: 100%; height: 100%; border: none; }
-          </style>
-      </head>
-      <body>
-          <embed src="file://${tempFilePath}" type="application/pdf" width="100%" height="100%">
-      </body>
-      </html>
-    `;
-    await fs.writeFile(htmlFilePath, htmlContent);
+    const cmd = `pdftoppm -png -r 300 -f 1 -l 5 "${pdfFile}" "${outputPrefix}"`;
+    await exec(cmd, { timeout: 60000 });
 
-    // 3. Launch Chromium with container-safe arguments
-    browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--no-zygote',
-        '--disable-gpu',
-        '--single-process',
-        '--disable-web-security',
-        '--allow-file-access-from-files',
-        '--disable-extensions',
-        '--disable-translate',
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--no-first-run',
-        '--disable-popup-blocking'
-      ],
-      defaultViewport: {
-        width: 1920,
-        height: 1080,
-        deviceScaleFactor
+    const files = await fs.readdir(tempDir);
+    const pngFiles = files
+      .filter(f => f.startsWith(`page_${timestamp}`) && f.endsWith('.png'))
+      .sort();
+
+    if (pngFiles.length === 0) throw new Error('No PNG generated');
+
+    const buffers = await Promise.all(
+      pngFiles.map(f => fs.readFile(path.join(tempDir, f)))
+    );
+
+    const metadatas = await Promise.all(
+      buffers.map(buf => sharp(buf).metadata())
+    );
+
+    if (buffers.length === 1) {
+      return await sharp(buffers[0])
+        .trim({ threshold: 10 })
+        .png()
+        .toBuffer();
+    }
+
+    const pageWidth = metadatas[0].width;
+    const totalHeight = metadatas.reduce((sum, m) => sum + m.height, 0);
+
+    const compositeInputs = [];
+    let currentTop = 0;
+    for (let i = 0; i < buffers.length; i++) {
+      compositeInputs.push({
+        input: buffers[i],
+        top: currentTop,
+        left: 0
+      });
+      currentTop += metadatas[i].height;
+    }
+
+    return await sharp({
+      create: {
+        width: pageWidth,
+        height: totalHeight,
+        channels: 4,
+        background: { r: 255, g: 255, b: 255, alpha: 1 }
       }
-    });
-
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080, deviceScaleFactor });
-
-    // 4. Open HTML wrapper file using domcontentloaded to prevent detachment timeout
-    const fileUrl = `file://${htmlFilePath}`;
-    console.log(`[${reqId}] Opening HTML viewer: ${fileUrl}`);
-    
-    await page.goto(fileUrl, { 
-      waitUntil: 'domcontentloaded', 
-      timeout: REQUEST_TIMEOUT 
-    });
-    
-    console.log(`[${reqId}] PDF viewer loaded successfully`);
-
-    // 5. Wait longer for PDF internal plugin viewer to paint the canvas/pages
-    console.log(`[${reqId}] Waiting ${render_delay_ms}ms for render...`);
-    await new Promise(resolve => setTimeout(resolve, render_delay_ms));
-
-    // 6. Take screenshot
-    console.log(`[${reqId}] Taking screenshot...`);
-    const screenshot = await page.screenshot({
-      type: 'png',
-      fullPage: false,
-      clip: {
-        x: 0,
-        y: 0,
-        width: 1920,
-        height: 1080
-      }
-    });
-
-    await page.close();
-    console.log(`[${reqId}] Screenshot captured: ${screenshot.length} bytes`);
-
-    // 6a. Auto-crop whitespace margins with sharp
-    console.log(`[${reqId}] Auto-cropping whitespace...`);
-    const croppedBuffer = await sharp(screenshot)
-      .trim({ background: { r: 255, g: 255, b: 255 } })
+    })
+      .composite(compositeInputs)
+      .trim({ threshold: 10 })
+      .png()
       .toBuffer();
 
-    console.log(`[${reqId}] Cropped screenshot: ${croppedBuffer.length} bytes`);
-    return croppedBuffer;
-
-  } catch (err) {
-    console.error(`[${reqId}] Rendering error:`, err.message);
-    throw new Error(`PDF rendering failed: ${err.message}`);
   } finally {
-    // 7. Cleanup temp files and browser
-    if (tempFilePath) {
-      try { await fs.unlink(tempFilePath); } catch (e) {}
-    }
-    if (htmlFilePath) {
-      try { await fs.unlink(htmlFilePath); } catch (e) {}
-    }
-    if (browser) {
-      try { await browser.close(); } catch (e) {}
-    }
+    try {
+      await fs.unlink(pdfFile);
+      const allFiles = await fs.readdir(tempDir);
+      await Promise.all(
+        allFiles
+          .filter(f => f.startsWith(`page_${timestamp}`) || f.startsWith(`input_${timestamp}`))
+          .map(f => fs.unlink(path.join(tempDir, f)).catch(() => {}))
+      );
+    } catch(e) {}
   }
 }
 
 // ============================================================
-// ERROR HANDLING
+// Legacy endpoints (backward compatibility)
 // ============================================================
-
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({ 
-    error: 'Internal server error', 
-    detail: err.message 
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'hf-spaces-queue-renderer',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    tokenCached: !!cachedSeaTalkToken
   });
 });
 
-// ============================================================
-// START SERVER
-// ============================================================
+// Keep /render for backward compat (optional)
+app.post('/render', requireProjectToken, async (req, res) => {
+  res.status(501).json({ error: 'Use /wakeup endpoint with Supabase queue instead' });
+});
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] HF Spaces rendering service listening on port ${PORT}`);
-  console.log(`[${new Date().toISOString()}] Projects configured: ${Object.keys(PROJECT_TOKENS).length}`);
-  console.log(`[${new Date().toISOString()}] Health check: http://localhost:${PORT}/health`);
-  console.log(`[${new Date().toISOString()}] Max PDF size: ${MAX_PDF_SIZE / 1024 / 1024}MB`);
+  console.log(`[${new Date().toISOString()}] HF Spaces renderer v2.0 listening on ${PORT}`);
+  console.log(`[${new Date().toISOString()}] Supabase: ${SUPABASE_URL}`);
+  console.log(`[${new Date().toISOString()}] Concurrency limit: ${CONCURRENCY}`);
 });
