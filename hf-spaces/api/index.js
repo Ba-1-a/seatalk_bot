@@ -5,9 +5,10 @@
  */
 
 const express = require('express');
-const { createClient } from '@supabase/supabase-js';
+const { createClient } = require('@supabase/supabase-js');
 const sharp = require('sharp');
-const { exec } = require('child_process/promises');
+const { promisify } = require('util');
+const exec = promisify(require('child_process').exec);
 const fs = require('fs/promises');
 const path = require('path');
 const os = require('os');
